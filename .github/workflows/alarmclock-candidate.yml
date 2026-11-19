@@ -1,6 +1,11 @@
 name: Alarm Clock candidate
 on:
   workflow_dispatch:
+    inputs:
+      verify_digest:
+        description: Existing sha256 index digest to verify without rebuilding
+        required: false
+        default: ""
 permissions:
   contents: read
   packages: write
@@ -9,8 +14,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
+    if: ${{ inputs.verify_digest == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -43,14 +51,6 @@ jobs:
         run: |
           docker buildx imagetools inspect "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" | tee candidate/manifest.txt
           printf '%s\n' "$DIGEST" > candidate/digest.txt
-      - name: Isolated amd64 boot
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: python3 candidate/smoke.py "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" linux/amd64 > candidate/boot-amd64.log 2>&1
-      - name: Isolated arm64 boot
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: python3 candidate/smoke.py "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" linux/arm64 > candidate/boot-arm64.log 2>&1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -58,5 +58,39 @@ jobs:
           path: |
             candidate/digest.txt
             candidate/manifest.txt
-            candidate/boot-*.log
             candidate/overlay/build.json
+  boot:
+    needs: publish
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    name: Boot ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      DIGEST: ${{ inputs.verify_digest || needs.publish.outputs.digest }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Validate immutable image reference
+        shell: bash
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf '%s\n' "$DIGEST" > candidate/digest.txt
+      - name: Isolated native boot
+        run: python3 candidate/smoke.py "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" "linux/$ARCH" > "candidate/boot-$ARCH.log" 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: alarmclock-boot-${{ matrix.arch }}
+          path: |
+            candidate/digest.txt
+            candidate/boot-*.log
