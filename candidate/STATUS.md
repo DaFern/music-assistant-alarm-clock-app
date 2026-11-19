@@ -17,35 +17,31 @@
   them at patched companion source correctly failed the fixture guard; the
   subsequent valid fixture run passed all 309 tests.
 
-## Blocker
+## Published and boot-verified
 
-The app commit push was rejected because the existing OAuth credential lacks
-`workflow` scope. No workflow was created remotely, no build dispatched, no image
-published and no candidate digest verified. Registry publication permission and
-package visibility remain untested. No credential changes or bypass were attempted.
+The initial workflow-scope blocker was resolved with user-approved GitHub browser
+authorization. App source was pushed and run 44571220076 built/published version
+`2.10.12-alarmclock.2`. Its sequential arm64 test hit a Docker image-store conflict;
+amd64 passed. Commit `7e87a4a` separated native architecture tests. Verification-only
+run 44572767798 passed amd64 and arm64 against the unchanged index:
 
-`app/config.yaml.template` prepares slug `music_assistant_alarm_clock`, preserving
-the upstream Supervisor API/network/volume contract. It has no `image` field:
-the final app must locally build the digest-pinned Dockerfile wrapper. Templates
-are deliberately not exposed as an installable app until a verified digest exists.
-The official app definitions remain unchanged.
+`sha256:8a6fa5278b043c6f3f3afbe12728a7261657f900ec8c669d05318017f8a02bba`
 
-## Next publication step
+Both artifacts verified HTTP readiness, Plex import and all 12 overlaid source
+hashes. Independent anonymous registry access verified the index hash and both
+platforms; visibility was not changed.
 
-Use an explicitly authorized credential that can push Actions workflows, then:
+## Dedicated app promotion
 
-1. Push this app branch and dispatch `alarmclock-candidate.yml` at its exact commit.
-2. Require both amd64 and arm64 boot checks to succeed, inspect manifest platforms,
-   review boot logs and source-hash evidence, and record the exact index digest.
-3. Check registry visibility without changing it. If private, anonymous Supervisor
-   pulls are blocked until a separately approved access/visibility arrangement.
-4. Replace the digest placeholder, place the reviewed templates in
-   `music_assistant_alarm_clock/` as `config.yaml` and `Dockerfile`, and commit/push.
-5. Reconcile the HA project's packaging/handoff docs with the published app, then
-   update Issue #2 after successful related commits and pushes.
+`../music_assistant_alarm_clock/config.yaml` promotes the dedicated slug with
+manual boot. Its Dockerfile pins the exact verified index. There is no `image`
+field: Supervisor locally builds the digest-pinned wrapper. Official app
+definitions remain unchanged. Promotion is source-only, not live installation.
+The app README records read-only Supervisor preflight and rollback prerequisites.
 
 ## Separately approved Supervisor boot test (not performed)
 
+DEV was started and stable was already stopped at preflight; preserve both states.
 Back up DEV/stable and retain their exact pins/data and HA integration connection.
 With explicit install/stop approval and no active alarm, add the app fork repository
 through Supervisor's store UI, refresh it, and install the digest-pinned dedicated

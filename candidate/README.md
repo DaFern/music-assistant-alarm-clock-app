@@ -18,5 +18,8 @@ not Supervisor or physical-speaker acceptance. Evidence is retained as an Action
 artifact; registry visibility is not changed. A private package cannot be pulled
 anonymously by Supervisor without separate access arrangements.
 
-The dedicated app wrapper will be added only after the published digest is verified.
-Do not install, stop DEV, copy runtime data, or cut over HA as part of publication.
+The verified wrapper is now in `../music_assistant_alarm_clock/`, pinned to index
+`sha256:8a6fa5278b043c6f3f3afbe12728a7261657f900ec8c669d05318017f8a02bba`.
+Run 44572767798 passed both native architecture boot jobs without rebuilding.
+Do not install, start the app, stop DEV, copy runtime data, or cut over HA without
+separate live action-time approval. See the app README for preflight/rollback.
