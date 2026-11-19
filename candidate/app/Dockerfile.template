@@ -1,0 +1,3 @@
+# Replace VERIFIED_INDEX_DIGEST only after both CI platform boot checks pass.
+# Keep this as a template until verified; do not expose an installable app yet.
+FROM ghcr.io/dafern/music-assistant-alarm-clock-server@sha256:VERIFIED_INDEX_DIGEST
