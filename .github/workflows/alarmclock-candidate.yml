@@ -1,0 +1,62 @@
+name: Alarm Clock candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: alarmclock-candidate
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: DaFern/music-assistant-alarm-clock-server
+          ref: f0c825c708fcca577430aac46aa30f8cbf23b79b
+          path: companion
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 candidate/prepare.py
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: build
+        with:
+          context: candidate
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/dafern/music-assistant-alarm-clock-server:2.10.12-alarmclock.2
+          provenance: mode=max
+          sbom: true
+      - name: Inspect published manifest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" | tee candidate/manifest.txt
+          printf '%s\n' "$DIGEST" > candidate/digest.txt
+      - name: Isolated amd64 boot
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: python3 candidate/smoke.py "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" linux/amd64 > candidate/boot-amd64.log 2>&1
+      - name: Isolated arm64 boot
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: python3 candidate/smoke.py "ghcr.io/dafern/music-assistant-alarm-clock-server@$DIGEST" linux/arm64 > candidate/boot-arm64.log 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: alarmclock-candidate-evidence
+          path: |
+            candidate/digest.txt
+            candidate/manifest.txt
+            candidate/boot-*.log
+            candidate/overlay/build.json
