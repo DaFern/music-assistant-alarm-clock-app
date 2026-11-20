@@ -1,3 +1,5 @@
+# Exact flow mapper from DaFern/music-assistant-alarm-clock-server
+# revision f0c825c708fcca577430aac46aa30f8cbf23b79b, used for regression tests.
 def _get_flow_queue_stream_index(
         self, queue: PlayerQueue, player: Player
     ) -> tuple[int | None, float]:
