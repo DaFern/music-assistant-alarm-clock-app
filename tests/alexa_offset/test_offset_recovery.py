@@ -29,6 +29,18 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
  async def test_actual_mapper_crosses_tracks(self):
   c,*_=fixture();result=await c.recover_alexa_flow('Office speakers',TOKEN,150000)
   self.assertTrue(result['ok']);c._play_index.assert_awaited_once_with('Office speakers','two',48,False)
+ async def test_format_conversion_is_same_stream(self):
+  for codec in ('flac','wav','aac'):
+   with self.subTest(codec=codec):
+    c,d,p,items=fixture();p._last_stream_url=p._last_stream_url.replace('.mp3','.'+codec)
+    result=await c.recover_alexa_flow('Office speakers',TOKEN,150000)
+    self.assertTrue(result['ok']);c._play_index.assert_awaited_once_with('Office speakers','two',48,False)
+ async def test_format_normalization_preserves_identity_guards(self):
+  for part,replacement in (('session','other-session'),('start','other-item'),('Office.mp3','Other.flac'),('Office%20speakers','Bedroom')):
+   with self.subTest(part=part):
+    c,d,p,items=fixture();p._last_stream_url=TOKEN.replace(part,replacement)
+    result=await c.recover_alexa_flow('Office speakers',TOKEN,150000)
+    self.assertEqual(result['reason'],'newer_stream');c._play_index.assert_not_awaited()
  async def test_actual_mapper_seek(self):
   c,*_=fixture();await c.recover_alexa_flow('Office speakers',TOKEN,30000);c._play_index.assert_awaited_once_with('Office speakers','one',48,False)
  async def test_rate(self):

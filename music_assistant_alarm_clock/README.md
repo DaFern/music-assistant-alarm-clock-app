@@ -1,3 +1,7 @@
+# 2.10.12-alarmclock.5 — Preserve stream identity across codec conversion
+
+The Alexa skill rewrites MA flow URLs to MP3. Match the flow mode, session, queue, initial item and output-player filename while allowing known output-codec suffixes to differ. Retain all stale-session, permission, current-source, queue-state and retry guards. Focused tests cover format conversion and mismatched session/item/queue/output-player identities. No NAS module change or data migration is needed. Physical recovery acceptance remains pending.
+
 # 2.10.12-alarmclock.4 — Alexa player-state compatibility
 
 Fix the controlled-test AttributeError by checking group/sync membership on `player.state`, matching the pinned server's PlayerState model. Regression fixtures deliberately omit direct `active_group` and `synced_to` attributes and cover both grouped and synced rejection. No database, configuration or NAS module change is required. Physical recovery acceptance is still pending.
