@@ -1,5 +1,5 @@
 name: MA – HA Alarm Clock
-version: 2.10.12-alarmclock.5
+version: 2.10.12-alarmclock.6
 slug: music_assistant_alarm_clock
 boot: manual
 description: Music Assistant 2.10.12 with the tested HA Alarm Clock companion and Plex Connect backport.

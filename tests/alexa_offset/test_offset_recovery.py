@@ -1,3 +1,10 @@
+import sys
+helper_name = 'music_assistant.controllers.player_queues.alexa_recovery_timeline'
+import importlib.util
+helper_spec = importlib.util.spec_from_file_location(helper_name, 'music_assistant_alarm_clock/alexa_recovery_timeline.py')
+helper = importlib.util.module_from_spec(helper_spec)
+sys.modules[helper_name] = helper
+helper_spec.loader.exec_module(helper)
 import ast,asyncio,importlib.util,time,unittest
 from enum import Enum
 from pathlib import Path
