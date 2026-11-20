@@ -1,3 +1,36 @@
+# Alexa timeline recovery candidate — 2.10.12-alarmclock.6
+
+Source candidate only. No promotion or live installation has been performed.
+
+The pinned stream producer replaces `flow_mode_stream_log` whenever the same
+session's URL is opened again. A late Alexa failure can therefore carry an
+elapsed offset from the original connection, while the recovery API sees a short
+new log. This candidate snapshots timing metadata immediately before that log is
+replaced, for Alexa players only. It preserves seek positions, speeds, durations
+and actual per-item streamed seconds; no audio or provider URLs are retained.
+
+Snapshots expire after 120 seconds from replacement, with at most eight per queue,
+32 queues and 256 entries per snapshot. Overflow refuses recovery. Only histories
+from the current queue/session participate. Multiple valid timelines must agree
+on item and position; otherwise recovery refuses with `ambiguous_stream_timeline`.
+Incomplete boundaries still fail closed. The existing permission, session,
+player, output/group, pause, takeover and retry-limit checks remain in force.
+
+Both the controller and stream producer must match their pinned source hashes
+before build-time changes are written. A small helper is installed beside the
+controller. There are no data migrations, audio buffer changes, provider limit
+changes or transport polling loops. The skill protocol is unchanged.
+
+26 local offline recovery tests pass, including a reproduction using the reported
+Dining Room offset (194517 ms), immutable seek/duration metadata, ambiguous history,
+TTL expiry, new sessions, bounds and pause safety. Helper/controller compilation and diff checks pass. The full pinned flow module uses Python 3.14 syntax and cannot compile under the local Python 3.12 interpreter; its compilation is checked during the image build.
+The repo's `pre-commit` executable is unavailable locally. Native image build/import
+and runtime unit tests are defined in the existing candidate CI workflow. These
+checks do not prove a fix for Office's missing failure callback or the cause of
+simultaneous reconnects. Physical acceptance remains pending.
+
+---
+
 # 2.10.12-alarmclock.5 — Preserve stream identity across codec conversion
 
 The Alexa skill rewrites MA flow URLs to MP3. Match the flow mode, session, queue, initial item and output-player filename while allowing known output-codec suffixes to differ. Retain all stale-session, permission, current-source, queue-state and retry guards. Focused tests cover format conversion and mismatched session/item/queue/output-player identities. No NAS module change or data migration is needed. Physical recovery acceptance remains pending.

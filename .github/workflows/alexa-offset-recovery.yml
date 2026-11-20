@@ -20,7 +20,10 @@ jobs:
         run: >-
           docker run --rm --entrypoint python ma-alexa-recovery-check -c
           'from music_assistant.controllers.player_queues.controller import PlayerQueuesController;
-          assert callable(PlayerQueuesController.recover_alexa_flow)'
+          assert callable(PlayerQueuesController.recover_alexa_flow);
+          from music_assistant.controllers.player_queues.alexa_recovery_timeline import remember_flow;
+          import inspect, music_assistant.controllers.streams.audio as audio;
+          assert "remember_flow(" in inspect.getsource(audio)'
       - name: Run focused tests in the actual app runtime
         run: >-
           docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace
