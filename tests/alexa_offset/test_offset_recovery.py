@@ -20,7 +20,7 @@ def fixture():
  items=[N(queue_item_id='one',duration=120,streamdetails=N(seconds_streamed=100,seek_position=20),extra_attributes={}),N(queue_item_id='two',duration=200,streamdetails=N(seconds_streamed=None,seek_position=0),extra_attributes={})]
  entries=[N(queue_item_id='one',seconds_streamed=100),N(queue_item_id='two',seconds_streamed=None)]
  data=N(queue=q,session_id='session',flow_mode_stream_log=entries)
- player=N(provider=N(domain='alexa'),active_group=None,synced_to=None,_last_stream_url='http://internal:8097'+TOKEN)
+ player=N(provider=N(domain='alexa'),state=N(active_group=None,synced_to=None),_last_stream_url='http://internal:8097'+TOKEN)
  c._queue_data={'Office speakers':data};c.mass=N(players=N(get_player=lambda _:player));c._check_player_permission=lambda _:None
  c.index_by_id=lambda _,itemid:next((i for i,x in enumerate(items) if x.queue_item_id==itemid),None)
  c.get_item=lambda _,idx: (items[idx] if isinstance(idx,int) and idx<len(items) else next((x for x in items if x.queue_item_id==idx),None))
@@ -34,14 +34,15 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
  async def test_rate(self):
   c,d,p,items=fixture();items[1].extra_attributes={'playback_speed':2};await c.recover_alexa_flow('Office speakers',TOKEN,150000);c._play_index.assert_awaited_once_with('Office speakers','two',98,False)
  async def test_rejections(self):
-  for case in ('paused','stale','otherplayer','newstream','group','emptylog','outside','missingitem','ambiguous','nonalexa','ended','negative','bool','permission'):
+  for case in ('paused','stale','otherplayer','newstream','group','synced','emptylog','outside','missingitem','ambiguous','nonalexa','ended','negative','bool','permission'):
    with self.subTest(case=case):
     c,d,p,items=fixture();offset=150000;token=TOKEN
     if case=='paused':d.queue.state=PlaybackState.PAUSED
     if case=='stale':d.session_id='new'
     if case=='otherplayer':token=token.replace('Office%20speakers','Bedroom')
     if case=='newstream':p._last_stream_url='/announcement/Office.mp3'
-    if case=='group':p.active_group='group'
+    if case=='group':p.state.active_group='group'
+    if case=='synced':p.state.synced_to='leader'
     if case=='emptylog':d.flow_mode_stream_log=[]
     if case=='outside':offset=999999
     if case=='missingitem':items.clear()

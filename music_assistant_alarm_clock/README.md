@@ -1,3 +1,7 @@
+# 2.10.12-alarmclock.4 — Alexa player-state compatibility
+
+Fix the controlled-test AttributeError by checking group/sync membership on `player.state`, matching the pinned server's PlayerState model. Regression fixtures deliberately omit direct `active_group` and `synced_to` attributes and cover both grouped and synced rejection. No database, configuration or NAS module change is required. Physical recovery acceptance is still pending.
+
 # Alexa offset recovery candidate — 2.10.12-alarmclock.3
 
 This update preserves the existing app slug, base image and data schema. It adds the authenticated `player_queues/recover_alexa_flow` command, requiring queue-control scope and the existing player-permission check. It is used only by the matching NAS Alexa skill offset-recovery module.
