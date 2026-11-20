@@ -1,0 +1,27 @@
+name: Alexa offset recovery candidate
+on:
+  push:
+    paths:
+      - music_assistant_alarm_clock/**
+      - tests/alexa_offset/**
+      - .github/workflows/alexa-offset-recovery.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-amd64-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build hash-guarded recovery app
+        run: docker build -t ma-alexa-recovery-check music_assistant_alarm_clock
+      - name: Check installed recovery API import
+        run: >-
+          docker run --rm --entrypoint python ma-alexa-recovery-check -c
+          'from music_assistant.controllers.player_queues.controller import PlayerQueuesController;
+          assert callable(PlayerQueuesController.recover_alexa_flow)'
+      - name: Run focused tests in the actual app runtime
+        run: >-
+          docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace
+          ma-alexa-recovery-check -m unittest discover -s tests/alexa_offset -p 'test*.py' -v

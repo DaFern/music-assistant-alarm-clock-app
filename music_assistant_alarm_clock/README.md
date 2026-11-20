@@ -1,3 +1,15 @@
+# Alexa offset recovery candidate — 2.10.12-alarmclock.3
+
+This update preserves the existing app slug, base image and data schema. It adds the authenticated `player_queues/recover_alexa_flow` command, requiring queue-control scope and the existing player-permission check. It is used only by the matching NAS Alexa skill offset-recovery module.
+
+Recovery requires a correlated Alexa playback failure and stopped event for the same stream token. The server uses its flow timeline and Alexa's stopped offset, never its advancing wall clock, and requests a fresh stream at the mapped queue item with a two-second rewind. It preserves queue items, rejects stale sessions, changed sources, grouped/paused/finished queues, ambiguous timing and missing media, and allows at most two attempts per queue per 120 seconds. An uncertain dispatch is consumed, not retried.
+
+The Docker build verifies the exact original controller SHA256 before inserting the API and compiles the result. No startup downloads, dependency changes, database migrations, provider-setting changes or automatic playback tests are included. The CI build/import checks and offline tests do not prove audible recovery; a controlled physical test remains required. This is recovery after supported failures, not proof that the underlying handoff fault is fixed. Failures with no Alexa event are not recovered. Protection against every cross-device race in the existing shared-stream transport is outside this patch.
+
+Before updating, back up this existing app through Supervisor. Do not migrate to a new slug or copy databases. Keep the .2 app build/backup for rollback. Deploy the server first and verify the new command is registered, then install the matching NAS skill module. Leaving the NAS module absent makes the new command passive. Keep fixed 48 kHz enabled during acceptance.
+
+---
+
 # MA – HA Alarm Clock
 
 Dedicated app slug: `music_assistant_alarm_clock`. Version:
