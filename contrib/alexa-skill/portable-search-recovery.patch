@@ -1,0 +1,1542 @@
+From 6542f8aee9e9f538d6f0949378b56d4a8f267ff4 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 20 Nov 2026 21:02:06 +0000
+Subject: [PATCH] Add portable per-Echo music search and guarded offset
+ recovery
+
+---
+ .github/workflows/portable-tests.yml |  18 ++
+ .gitignore                           |   6 +-
+ PORTABLE_SETUP.md                    | 104 ++++++++++
+ README.md                            |   2 +
+ app/endpoints/devices.py             |  12 +-
+ app/models/en-AU.json                |  34 +++-
+ app/models/en-CA.json                |  34 +++-
+ app/models/en-GB.json                |  20 +-
+ app/models/en-IN.json                |  34 +++-
+ app/models/en-US.json                |  34 +++-
+ app/music_assistant_api/ma_routes.py |   8 +-
+ app/requirements.txt                 |   3 +-
+ app/shared_store.py                  |  44 ++++-
+ app/skill/apl.py                     |   5 +-
+ app/skill/data.py                    |  59 ++++--
+ app/skill/device_mapping.py          |   2 +-
+ app/skill/lambda_function.py         | 117 ++++++++---
+ app/skill/music_search.py            | 119 +++++++++++
+ app/skill/offset_recovery.py         | 108 ++++++++++
+ app/skill/util.py                    |   2 +-
+ docker-compose.portable.yml          |  32 +++
+ tests/portable/test_portable.py      | 282 +++++++++++++++++++++++++++
+ 22 files changed, 1017 insertions(+), 62 deletions(-)
+ create mode 100644 .github/workflows/portable-tests.yml
+ create mode 100644 PORTABLE_SETUP.md
+ create mode 100644 app/skill/music_search.py
+ create mode 100644 app/skill/offset_recovery.py
+ create mode 100644 docker-compose.portable.yml
+ create mode 100644 tests/portable/test_portable.py
+
+diff --git a/.github/workflows/portable-tests.yml b/.github/workflows/portable-tests.yml
+new file mode 100644
+index 0000000..cc7c69c
+--- /dev/null
++++ b/.github/workflows/portable-tests.yml
+@@ -0,0 +1,18 @@
++name: Portable Alexa regressions
++on:
++  push:
++    paths: ['app/**', 'tests/portable/**', '.github/workflows/portable-tests.yml']
++  pull_request:
++    paths: ['app/**', 'tests/portable/**', '.github/workflows/portable-tests.yml']
++permissions:
++  contents: read
++jobs:
++  tests:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
++      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
++        with:
++          python-version: '3.12'
++      - run: python -m pip install -r app/requirements.txt
++      - run: python -m unittest discover -s tests/portable -v
+diff --git a/.gitignore b/.gitignore
+index c150632..9b8c2a7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -86,4 +86,8 @@ addons/music-assistant-skill/assets
+ addons/music-assistant-skill/scripts
+ 
+ # ASK CLI data
+-ask_data/
+\ No newline at end of file
++ask_data/
++# Local credentials and mappings
++secrets/
++instance_data/
++.env
+diff --git a/PORTABLE_SETUP.md b/PORTABLE_SETUP.md
+new file mode 100644
+index 0000000..2ec4a66
+--- /dev/null
++++ b/PORTABLE_SETUP.md
+@@ -0,0 +1,104 @@
++# Portable search and offset recovery candidate
++
++This candidate builds on `alams154/music-assistant-alexa-skill-prototype` commit
++`2967b60551250bcce50586e9de0f6b036dcff237`. It contains the search and callback
++recovery changes exercised on one physical Echo, plus new per-player transport
++isolation and offline regressions. The latter changes still need physical
++multi-Echo acceptance. This is not a claim of support for every Echo model.
++
++## What changes
++
++- Music searches target the player paired with the requesting Echo. Exact-name
++  ambiguity is reported rather than silently choosing between distinct URIs.
++- MA flow and announcement publications are indexed by player. Mapped requests
++  never use a different player's latest stream; unmapped requests cannot launch
++  the global stream. Request-local metadata and APL capability prevent concurrent
++  requests from sharing artwork or display settings.
++- A failed flow can recover at the reported listening position through the
++  matching MA server API. A stopped callback alone never triggers recovery.
++  Pause, stop, next, search and fresh playback cancel an older recovery attempt.
++- Pairing survives restarts when `instance_data` is mounted. The pairing page
++  confirms a successful save and reports persistence failures.
++
++No home addresses, room IDs, account tokens or personal device mappings are
++included. Names containing spaces, apostrophes or Unicode are covered offline.
++
++## Requirements and compatibility
++
++Search uses `music-assistant-client==1.5.1`; the physically exercised MA server
++was 2.10.12 (schema 65). A public HTTPS skill endpoint and public reachable audio
++endpoint remain necessary. The same existing Alexa skill setup is used; this is
++not a registered/default Alexa music provider.
++
++Offset recovery additionally requires the authenticated
++`player_queues/recover_alexa_flow` API from the companion server patch, currently
++packaged in [MA Alarm Clock app 2.10.12-alarmclock.5](https://github.com/DaFern/music-assistant-alarm-clock-app/tree/6e0f51dd0ab4fbe22e7609a55870a68efc79a9a3).
++That build-time patch checks the exact pinned MA source hash. It is not a patch
++for arbitrary MA versions. Standard servers can use search and controls with
++`ENABLE_ALEXA_OFFSET_RECOVERY=false` (the default). Only enable recovery after
++installing a server with that API; there is no fallback that replays an expired URL.
++
++The server retains permission checks, rejects stale streams, inactive queues,
++grouped/synced players, ambiguous timelines and unseekable content. It uses MA's
++flow mapper, not its advancing playback clock, and rewinds two seconds. Attempts
++are bounded to two per queue within 120 seconds, once per failed session. These
++bounds prevent loops; they do not cure the cause of a broken stream.
++
++## Setup on any Docker host
++
++1. Preserve your current image, source and data before replacing an installation.
++   This candidate does not migrate or overwrite an existing deployment for you.
++2. Copy `docker-compose.portable.yml` and configure `SKILL_HOSTNAME`, `SKILL_ID`,
++   `MA_HOSTNAME` and `MA_API_URL` for your own installation. Hostnames are bare
++   names (no scheme); the MA API value is a full base URL. Set `LOCALE` to match
++   the Echo, e.g. `en-GB`.
++3. Create private files `secrets/app_username.txt`, `secrets/app_password.txt`
++   and `secrets/ma_api_token.txt`. Use a Music Assistant token with access to the
++   intended players. Keep these files private and out of git. The example mounts
++   them as secrets and persists both ASK credentials and device mappings.
++4. Build/start with `docker compose -f docker-compose.portable.yml up -d --build`
++   only when ready to change your installation. Configure the reverse proxies
++   and existing skill setup as described in the main README. Keep authenticated
++   management routes protected; Alexa's signed invocation endpoint must still
++   be reachable by Amazon.
++5. From **each Echo**, invoke your skill's help, refresh `/devices`, then pair the
++   newly seen opaque Alexa device ID with that Echo's exact MA `player_id`.
++   Display names are not guaranteed to equal IDs. The save confirms persistence,
++   not that the ID exists or that playback works. No automatic room-name matching
++   is attempted. Pair direct Echo players, not a tablet or unrelated group.
++6. Upload/build the corresponding locale's interaction model using your existing
++   skill setup or Alexa Developer Console. Search samples are included for all
++   five English locale models. Keep the invocation name consistent with your
++   skill and MA Alexa provider configuration. Other locales retain their prior
++   models and need translated search samples before voice search is supported.
++7. Say, for example, “Alexa, ask [your invocation name] to play songs by [artist]”.
++   Use your Echo's configured wake word. “Find the album [title] by [artist]”
++   and “find the song [title] by [artist]” provide media type hints.
++   Preserve the slotless `PlayAudio` intent: MA uses “play audio” internally.
++   Do not add a broad `play {query}` sample that captures that transport command.
++8. Leave `ENABLE_ALEXA_OFFSET_RECOVERY=false` on a standard MA server. Set it to
++   `true` and recreate the skill container only with the matching server API.
++
++## Acceptance before calling this a release
++
++Run offline tests with no live credentials:
++
++```sh
++python -m venv .venv
++.venv/bin/pip install -r app/requirements.txt
++.venv/bin/python -m unittest discover -s tests/portable -v
++```
++
++Then check fresh playback, pause/resume, a deliberate artist change, and independent
++playback on at least two mapped Echos. Verify that a request on an unmapped device
++cannot launch another room's stream. Verify that actual failure/stopped callbacks
++recover the right item/position and that intentional pauses stay paused.
++
++Streams and callback correlation are in-memory. After a skill restart, start fresh
++playback from MA; old streams are not recovered from guessed positions. Multiple
++web workers/processes are not supported by this in-memory transport design; use
++one process (the supplied Flask deployment). Mapping names with literal slashes,
++announcements with nonstandard route formats, grouped/synced players, missing
++callbacks and live radio timelines have not been validated. APL display and
++physical multi-Echo behavior need acceptance. No runtime deployment is performed
++by applying the source patch or running the offline tests.
+diff --git a/README.md b/README.md
+index ce32675..e2d0126 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,6 @@
+ # Music Assistant Alexa Skill Prototype
++
++**Portable candidate:** see [search, per-Echo routing and optional recovery setup](PORTABLE_SETUP.md) for the new behavior and compatibility limits.
+ This project is an Alexa skill prototype for controlling the Music Assistant server. It provides a Flask-based web service, an Alexa skill handler, an API, and ASK CLI integration with Docker deployment support.
+ 
+ ## How to Run
+diff --git a/app/endpoints/devices.py b/app/endpoints/devices.py
+index 4541eab..1447dfa 100644
+--- a/app/endpoints/devices.py
++++ b/app/endpoints/devices.py
+@@ -88,11 +88,13 @@ def devices_page():
+ 
+     rows_html = '\n'.join(rows) or '<tr><td colspan="4" class="muted">No devices seen yet. Trigger an intent from each Echo, then reload this page.</td></tr>'
+ 
++    confirmation = '<p role="status">Mapping saved.</p>' if request.args.get("saved") == "1" else ""
+     body = f"""
++    {confirmation}
+     <p class="muted">Alexa does not expose a friendly device name to Custom Skills, only an opaque per-device id.
+     Trigger any voice command (e.g. "next") from each Echo you want to control MA from, reload this page,
+     then pair each device id with its Music Assistant player_id (the name shown in MA, e.g. "Studio").
+-    Only Next/Previous are currently routed to MA.</p>
++    Search, track controls and optional offset recovery use this mapping. Pair every Echo once.</p>
+     <table>
+         <thead><tr><th>Device id (last 12 chars)</th><th>Last seen</th><th>Last request</th><th>MA player_id</th></tr></thead>
+         <tbody>
+@@ -115,6 +117,8 @@ def devices_page():
+ def devices_save():
+     device_id = (request.form.get('device_id') or '').strip()
+     player_id = (request.form.get('player_id') or '').strip()
+-    if device_id:
+-        device_mapping.set_player_for_device(device_id, player_id or None)
+-    return redirect(url_for('devices_bp.devices_page'))
++    if not device_id:
++        return Response("Missing device id.", status=400)
++    if not device_mapping.set_player_for_device(device_id, player_id or None):
++        return Response("Mapping could not be saved. Check persistent storage permissions.", status=500)
++    return redirect(url_for('devices_bp.devices_page', saved="1"))
+diff --git a/app/models/en-AU.json b/app/models/en-AU.json
+index b407f39..f5879fb 100644
+--- a/app/models/en-AU.json
++++ b/app/models/en-AU.json
+@@ -3,6 +3,38 @@
+         "languageModel": {
+             "invocationName": "my radio",
+             "intents": [
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
+                 {
+                     "name": "PlayAudio",
+                     "slots": [],
+@@ -71,4 +103,4 @@
+             "types": []
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/models/en-CA.json b/app/models/en-CA.json
+index c6e12a4..cb1147c 100644
+--- a/app/models/en-CA.json
++++ b/app/models/en-CA.json
+@@ -3,6 +3,38 @@
+         "languageModel": {
+             "invocationName": "my radio",
+             "intents": [
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
+                 {
+                     "name": "PlayAudio",
+                     "slots": [],
+@@ -71,4 +103,4 @@
+             "types": []
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/models/en-GB.json b/app/models/en-GB.json
+index 9ef8c88..2f86571 100644
+--- a/app/models/en-GB.json
++++ b/app/models/en-GB.json
+@@ -1,8 +1,24 @@
+ {
+     "interactionModel": {
+         "languageModel": {
+-            "invocationName": "my radio",
++            "invocationName": "music assistant",
+             "intents": [
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
+                 {
+                     "name": "PlayAudio",
+                     "slots": [],
+@@ -65,4 +81,4 @@
+             "types": []
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/models/en-IN.json b/app/models/en-IN.json
+index 8327a60..a7d921b 100644
+--- a/app/models/en-IN.json
++++ b/app/models/en-IN.json
+@@ -3,6 +3,38 @@
+         "languageModel": {
+             "invocationName": "my radio",
+             "intents": [
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
+                 {
+                     "name": "PlayAudio",
+                     "slots": [],
+@@ -67,4 +99,4 @@
+             "types": []
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/models/en-US.json b/app/models/en-US.json
+index 8327a60..a7d921b 100644
+--- a/app/models/en-US.json
++++ b/app/models/en-US.json
+@@ -3,6 +3,38 @@
+         "languageModel": {
+             "invocationName": "my radio",
+             "intents": [
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
++                {
++                    "name": "SearchMusicIntent",
++                    "slots": [
++                        {
++                            "name": "query",
++                            "type": "AMAZON.SearchQuery"
++                        }
++                    ],
++                    "samples": [
++                        "play songs by {query}",
++                        "play music by {query}",
++                        "find {query}",
++                        "search for {query}",
++                        "listen to {query}"
++                    ]
++                },
+                 {
+                     "name": "PlayAudio",
+                     "slots": [],
+@@ -67,4 +99,4 @@
+             "types": []
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/app/music_assistant_api/ma_routes.py b/app/music_assistant_api/ma_routes.py
+index cc033af..e649d31 100644
+--- a/app/music_assistant_api/ma_routes.py
++++ b/app/music_assistant_api/ma_routes.py
+@@ -38,17 +38,15 @@ def register_routes(bp):
+         stream_url = _rewrite_url(stream_url)
+         image_url = _rewrite_url(data.get('imageUrl'))
+ 
+-        shared_store._version += 1
+-        shared_store._store = {
++        published = shared_store.publish({
+             'streamUrl': stream_url,
+             'title': data.get('title'),
+             'artist': data.get('artist'),
+             'album': data.get('album'),
+             'imageUrl': image_url,
+-            'version': shared_store._version,
+             'timestamp': time.time()
+-        }
+-        return jsonify({'status': 'ok', 'version': shared_store._version})
++        })
++        return jsonify({'status': 'ok', 'version': published['version']})
+ 
+     @bp.route('/latest-url', methods=['GET'])
+     def latest_url():
+diff --git a/app/requirements.txt b/app/requirements.txt
+index 3c2f3ac..9d2890d 100644
+--- a/app/requirements.txt
++++ b/app/requirements.txt
+@@ -4,4 +4,5 @@ flask
+ flask_ask_sdk
+ requests
+ oscrypto>=1.3.0
+-music-assistant-client
+\ No newline at end of file
++music-assistant-client==1.5.1
++aiohttp
+diff --git a/app/shared_store.py b/app/shared_store.py
+index 58cd7a8..c5b9164 100644
+--- a/app/shared_store.py
++++ b/app/shared_store.py
+@@ -1,4 +1,44 @@
+-"""Shared store for MA and Alexa routes."""
++"""Process-local stream publications, isolated by player for mapped Echos."""
++from contextvars import ContextVar
++from threading import RLock
++from urllib.parse import unquote, urlsplit
+ 
+-_store = None
++_store = None  # Legacy unscoped status endpoints only; never a mapped Echo fallback.
+ _version = 0
++_players = {}
++_lock = RLock()
++request_player = ContextVar("alexa_request_player", default=None)
++
++
++def player_from_url(url):
++    """Extract the player from MA's flow or announcement route, without decoding slashes."""
++    if not isinstance(url, str):
++        return None
++    parts = urlsplit(url).path.strip("/").split("/")
++    if len(parts) == 5 and parts[0] == "flow":
++        player = unquote(parts[2])
++        filename = unquote(parts[4]).rsplit(".", 1)[0]
++        return player if player and filename == player else None
++    if len(parts) == 2 and parts[0] == "announcement":
++        return unquote(parts[1]).rsplit(".", 1)[0] or None
++    return None
++
++
++def publish(payload):
++    """Atomically publish one stream; unidentifiable URLs stay unscoped."""
++    global _store, _version
++    with _lock:
++        _version += 1
++        value = dict(payload, version=_version)
++        _store = value
++        player = player_from_url(value.get("streamUrl"))
++        if player:
++            _players[player] = value
++        return dict(value)
++
++
++def latest(player_id=None):
++    """Read a copy; a scoped miss must never return another player's stream."""
++    with _lock:
++        value = _players.get(player_id) if player_id else _store
++        return dict(value) if value else None
+diff --git a/app/skill/apl.py b/app/skill/apl.py
+index 017eaea..c27ea68 100644
+--- a/app/skill/apl.py
++++ b/app/skill/apl.py
+@@ -100,8 +100,9 @@ def _get_metadata():
+     # Priority 1: shared_store (most reliable, set by MA)
+     try:
+         import shared_store
+-        if shared_store._store:
+-            store = shared_store._store
++        player = shared_store.request_player.get()
++        store = shared_store.latest(player) if player != "" else None
++        if store:
+             return {
+                 "audioSources": store.get("streamUrl", ""),
+                 "backgroundImageSource": store.get("imageUrl", ""),
+diff --git a/app/skill/data.py b/app/skill/data.py
+index 99b664e..f0c56bb 100644
+--- a/app/skill/data.py
++++ b/app/skill/data.py
+@@ -29,16 +29,46 @@ DEVICE_NOT_SUPPORTED = _("Sorry, this skill is not supported on this device")
+ DEVICE_NOT_MAPPED_MSG = _("This device is not paired with a Music Assistant player yet. Please configure it on the status page.")
+ MA_COMMAND_FAILED_MSG = _("Sorry, I could not reach Music Assistant to skip the track.")
+ 
+-info = {
+-    "audioSources": "",
+-    "backgroundImageSource": "",
+-    "coverImageSource": "",
+-    "headerAttributionImage": "",
+-    "headerTitle": "",
+-    "headerSubtitle": "",
+-    "primaryText": "",
+-    "secondaryText": ""
+-}
++from collections.abc import MutableMapping
++from contextvars import ContextVar
++import shared_store
++
++_request_info = ContextVar("alexa_request_info", default=None)
++
++
++class RequestInfo(MutableMapping):
++    """Keep the existing metadata interface without sharing data between requests."""
++    def _value(self):
++        value = _request_info.get()
++        if value is None:
++            value = {}
++            _request_info.set(value)
++        return value
++
++    def __getitem__(self, key):
++        return self._value()[key]
++
++    def __setitem__(self, key, value):
++        self._value()[key] = value
++
++    def __delitem__(self, key):
++        del self._value()[key]
++
++    def __iter__(self):
++        return iter(self._value())
++
++    def __len__(self):
++        return len(self._value())
++
++
++info = RequestInfo()
++
++
++def begin_request(player_id):
++    # An unmapped Echo is explicitly blocked from using global transport state.
++    shared_store.request_player.set(player_id or "")
++    _request_info.set({})
++
+ 
+ def get_latest(api_hostname=None, path='/ma/latest-url', scheme='http', timeout=5, username=None, password=None):
+     global info
+@@ -46,8 +76,9 @@ def get_latest(api_hostname=None, path='/ma/latest-url', scheme='http', timeout=
+     # PRIORITAET 1: Direkt aus shared_store lesen (KEIN CACHE!)
+     try:
+         import shared_store
+-        if shared_store._store and shared_store._store.get('streamUrl'):
+-            payload = shared_store._store
++        player = shared_store.request_player.get()
++        payload = shared_store.latest(player) if player != "" else None
++        if payload and payload.get('streamUrl'):
+ 
+             stream_url = payload.get('streamUrl') or ''
+             title = payload.get('title', '') or ''
+@@ -85,6 +116,10 @@ def get_latest(api_hostname=None, path='/ma/latest-url', scheme='http', timeout=
+     except Exception as e:
+         logging.warning('shared_store read failed: %s', e)
+ 
++    if shared_store.request_player.get() is not None:
++        info.clear()
++        return {'changed': False}
++
+     # FALLBACK: Original HTTP behavior
+     port = os.environ.get('PORT')
+     api_hostname = f'127.0.0.1:{port}'
+diff --git a/app/skill/device_mapping.py b/app/skill/device_mapping.py
+index ebf601b..8f79bb8 100644
+--- a/app/skill/device_mapping.py
++++ b/app/skill/device_mapping.py
+@@ -41,7 +41,7 @@ def load_mapping():
+ def save_mapping(mapping):
+     path = _path()
+     try:
+-        os.makedirs(os.path.dirname(path), exist_ok=True)
++        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+         with _lock:
+             tmp_path = path + ".tmp"
+             with open(tmp_path, "w", encoding="utf-8") as f:
+diff --git a/app/skill/lambda_function.py b/app/skill/lambda_function.py
+index 2d1a709..b00ef1a 100644
+--- a/app/skill/lambda_function.py
++++ b/app/skill/lambda_function.py
+@@ -1,3 +1,4 @@
++from . import offset_recovery
+ # -*- coding: utf-8 -*-
+ 
+ import logging
+@@ -88,7 +89,6 @@ logging.basicConfig(
+     datefmt="%H:%M:%S %Y-%m-%d %z"
+ )
+ 
+-supports_apl = False
+ 
+ def _get_stream_url(request):
+     """Return (url, audio_data) where url is resolved from util.audio_data.
+@@ -175,6 +175,7 @@ class LaunchRequestOrPlayAudioHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In LaunchRequestOrPlayAudioHandler")
+ 
+         _ = handler_input.attributes_manager.request_attributes["_"]
+@@ -182,16 +183,6 @@ class LaunchRequestOrPlayAudioHandler(AbstractRequestHandler):
+         url, _audio = _get_stream_url(request)
+         logger.info("URL from util.audio_data: %s", url)
+ 
+-        # FIX: Fallback to shared_store directly if util.audio_data is empty
+-        if not url:
+-            try:
+-                import shared_store
+-                if shared_store._store and shared_store._store.get('streamUrl'):
+-                    url = shared_store._store['streamUrl']
+-                    logger.info("URL from shared_store fallback: %s", url)
+-            except Exception as e:
+-                logger.warning("shared_store fallback failed: %s", e)
+-
+         if not url:
+             logger.warning("No streamUrl available for Launch/Play request")
+             handler_input.response_builder.speak(
+@@ -204,7 +195,39 @@ class LaunchRequestOrPlayAudioHandler(AbstractRequestHandler):
+             offset=0,
+             text=data.WELCOME_MSG,
+             response_builder=handler_input.response_builder,
+-            supports_apl=supports_apl
++            supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False)
++        )
++
++
++class SearchMusicIntentHandler(AbstractRequestHandler):
++    """Handle music searches separately from slotless stream playback."""
++
++    def can_handle(self, handler_input):
++        return is_intent_name("SearchMusicIntent")(handler_input)
++
++    def handle(self, handler_input):
++        offset_recovery.cancel(_device_id_from(handler_input))
++        from html import escape
++        from .music_search import search_and_play
++
++        device_id = _device_id_from(handler_input)
++        player_id = device_mapping.get_player_for_device(device_id)
++        slots = handler_input.request_envelope.request.intent.slots or {}
++        query_slot = slots.get("query")
++        query = (getattr(query_slot, "value", None) or "").strip()
++
++        if not player_id:
++            message = "This Echo is not paired with a Music Assistant player. Please configure it on the devices page."
++        elif not query:
++            message = "Please name an artist, song, album or playlist."
++        else:
++            message = search_and_play(player_id, query)
++
++        return (
++            handler_input.response_builder
++            .speak(escape(message))
++            .set_should_end_session(True)
++            .response
+         )
+ 
+ 
+@@ -292,6 +315,7 @@ class NextOrPreviousIntentHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In NextOrPreviousIntentHandler")
+         _ = handler_input.attributes_manager.request_attributes["_"]
+ 
+@@ -324,10 +348,11 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In CancelOrStopIntentHandler")
+         _ = handler_input.attributes_manager.request_attributes["_"]
+         _sync_to_ma_unless_echo(handler_input, "stop")
+-        return util.stop(_(data.STOP_MSG), handler_input.response_builder, supports_apl=supports_apl)
++        return util.stop(_(data.STOP_MSG), handler_input.response_builder, supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False))
+ 
+ 
+ class PauseIntentHandler(AbstractRequestHandler):
+@@ -338,6 +363,7 @@ class PauseIntentHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In PauseIntentHandler")
+         _ = handler_input.attributes_manager.request_attributes["_"]
+         session_new = False
+@@ -348,7 +374,7 @@ class PauseIntentHandler(AbstractRequestHandler):
+ 
+         return util.pause(text=None,
+                   response_builder=handler_input.response_builder,
+-                  supports_apl=supports_apl,
++                  supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False),
+                   session_new=session_new)
+ 
+ 
+@@ -360,6 +386,7 @@ class ResumeIntentHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In ResumeIntentHandler")
+         request = handler_input.request_envelope.request
+         _ = handler_input.attributes_manager.request_attributes["_"]
+@@ -380,7 +407,7 @@ class ResumeIntentHandler(AbstractRequestHandler):
+             offset=offset,
+             text=data.WELCOME_MSG,
+             response_builder=handler_input.response_builder,
+-            supports_apl=supports_apl
++            supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False)
+         )
+ 
+ 
+@@ -396,6 +423,7 @@ class StartOverIntentHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In StartOverIntentHandler")
+         _ = handler_input.attributes_manager.request_attributes["_"]
+ 
+@@ -450,6 +478,8 @@ class PlaybackStartedHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.started(_device_id_from(handler_input),
++            getattr(handler_input.request_envelope.request, "token", None))
+         logger.info("In PlaybackStartedHandler")
+         logger.info("Playback started")
+         return handler_input.response_builder.response
+@@ -483,10 +513,17 @@ class PlaybackStoppedHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        stopped = handler_input.request_envelope.request
++        offset_recovery.event(_device_id_from(handler_input),
++            getattr(stopped, "token", None),
++            getattr(stopped, "offset_in_milliseconds", None))
+         logger.info("In PlaybackStoppedHandler")
+         logger.info("Playback stopped")
+         try:
+             request = handler_input.request_envelope.request
++            logger.info("Alexa stopped offset_ms=%s token=%s",
++                        getattr(request, "offset_in_milliseconds", None),
++                        getattr(request, "token", None))
+             util.record_stopped_position(
+                 _device_id_from(handler_input),
+                 getattr(request, 'token', None),
+@@ -542,6 +579,12 @@ class PlaybackFailedHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        failed_request = handler_input.request_envelope.request
++        failed_token = getattr(failed_request, "token", None)
++        if offset_recovery.canonical(failed_token):
++            logger.warning("MA flow failure: %s", getattr(failed_request, "error", None))
++            offset_recovery.event(_device_id_from(handler_input), failed_token, failure=True)
++            return handler_input.response_builder.response
+         logger.info("In PlaybackFailedHandler")
+         request = handler_input.request_envelope.request
+         logger.info("Playback failed: {}".format(request.error))
+@@ -550,12 +593,22 @@ class PlaybackFailedHandler(AbstractRequestHandler):
+             logger.warning("No stream url available for PlaybackFailed; skipping restart")
+             return handler_input.response_builder.response
+ 
++        from urllib.parse import urlsplit
++
++        failed_token = getattr(request, "token", None)
++        if any(
++            isinstance(value, str) and urlsplit(value).path.startswith("/flow/")
++            for value in (failed_token, url)
++        ):
++            logger.warning("Skipping automatic replay of failed MA flow stream")
++            return handler_input.response_builder.response
++
+         return util.play(
+             url=url, 
+             offset=0, 
+             text=None,
+             response_builder=handler_input.response_builder,
+-            supports_apl=supports_apl
++            supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False)
+         )
+ 
+ 
+@@ -659,6 +712,7 @@ class PlayCommandHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In PlayCommandHandler")
+         _ = handler_input.attributes_manager.request_attributes["_"]
+         request = handler_input.request_envelope.request
+@@ -674,7 +728,7 @@ class PlayCommandHandler(AbstractRequestHandler):
+             offset=0,
+             text=None,
+             response_builder=handler_input.response_builder,
+-            supports_apl=supports_apl
++            supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False)
+         )
+ 
+ 
+@@ -695,6 +749,7 @@ class NextOrPreviousCommandHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In NextOrPreviousCommandHandler")
+         req_type = handler_input.request_envelope.request.object_type
+         command = "next" if "Next" in req_type else "previous"
+@@ -723,10 +778,11 @@ class PauseCommandHandler(AbstractRequestHandler):
+ 
+     def handle(self, handler_input):
+         # type: (HandlerInput) -> Response
++        offset_recovery.cancel(_device_id_from(handler_input))
+         logger.info("In PauseCommandHandler")
+         return util.stop(text=None,
+                          response_builder=handler_input.response_builder,
+-                         supports_apl=supports_apl)
++                         supports_apl=handler_input.attributes_manager.request_attributes.get("supports_apl", False))
+ 
+ # ###################################################################
+ 
+@@ -755,16 +811,21 @@ class CatchAllExceptionHandler(AbstractExceptionHandler):
+ # ############# REQUEST / RESPONSE INTERCEPTORS #####################
+ 
+ class APLSupportRequestInterceptor(AbstractRequestInterceptor):
+-    """Request Interceptor to check if the device supports APL and update the global supports_apl variable."""
++    """Keep the requesting device's display capability local to the request."""
+     def process(self, handler_input):
+-        global supports_apl
+-        if hasattr(handler_input, 'request_envelope'):
+-            supported_interfaces = getattr(
+-                handler_input.request_envelope.context.system.device.supported_interfaces,
+-                'alexa_presentation_apl', None)
+-            supports_apl = supported_interfaces is not None
+-        else:
+-            supports_apl = False
++        try:
++            interfaces = handler_input.request_envelope.context.system.device.supported_interfaces
++            supported = getattr(interfaces, 'alexa_presentation_apl', None) is not None
++        except AttributeError:
++            supported = False
++        handler_input.attributes_manager.request_attributes["supports_apl"] = supported
++
++
++class PlayerContextInterceptor(AbstractRequestInterceptor):
++    """Select only the stream belonging to the Echo making this request."""
++    def process(self, handler_input):
++        data.begin_request(device_mapping.get_player_for_device(_device_id_from(handler_input)))
++
+ 
+ class RequestLogger(AbstractRequestInterceptor):
+     """Log the alexa requests."""
+@@ -844,6 +905,7 @@ class ResponseLogger(AbstractResponseInterceptor):
+ # Request Handlers
+ sb.add_request_handler(CheckAudioInterfaceHandler())
+ sb.add_request_handler(SkillEventHandler())
++sb.add_request_handler(SearchMusicIntentHandler())
+ sb.add_request_handler(LaunchRequestOrPlayAudioHandler())
+ sb.add_request_handler(PlayCommandHandler())
+ sb.add_request_handler(HelpIntentHandler())
+@@ -868,6 +930,7 @@ sb.add_request_handler(PlaybackFailedHandler())
+ sb.add_exception_handler(CatchAllExceptionHandler())
+ 
+ # Interceptors
++sb.add_global_request_interceptor(PlayerContextInterceptor())
+ sb.add_global_request_interceptor(APLSupportRequestInterceptor())
+ sb.add_global_request_interceptor(RequestLogger())
+ sb.add_global_request_interceptor(LocalizationInterceptor())
+diff --git a/app/skill/music_search.py b/app/skill/music_search.py
+new file mode 100644
+index 0000000..82c623d
+--- /dev/null
++++ b/app/skill/music_search.py
+@@ -0,0 +1,119 @@
++"""Search Music Assistant and play a matching item on the mapped Echo."""
++import asyncio
++import logging
++import re
++import unicodedata
++
++import aiohttp
++from music_assistant_client import MusicAssistantClient
++from music_assistant_models.enums import MediaType, QueueOption
++from env_secrets import get_env_secret
++
++logger = logging.getLogger(__name__)
++
++
++def normalize(value):
++    value = unicodedata.normalize("NFKC", value or "").casefold()
++    return " ".join(re.findall(r"\w+", value))
++
++
++def parse_query(query):
++    query = query.strip()
++    patterns = (
++        (r"^(?:songs|music|tracks) by (.+)$", MediaType.ARTIST),
++        (r"^(?:the )?artist (.+)$", MediaType.ARTIST),
++        (r"^(?:the )?album (.+)$", MediaType.ALBUM),
++        (r"^(?:the )?playlist (.+)$", MediaType.PLAYLIST),
++        (r"^(?:the )?(?:song|track) (.+)$", MediaType.TRACK),
++    )
++    for pattern, kind in patterns:
++        match = re.match(pattern, query, re.I)
++        if match:
++            return match.group(1).strip(), kind
++    return query, None
++
++
++async def _search_and_play(player_id, query):
++    server = get_env_secret("MA_API_URL")
++    token = get_env_secret("MA_API_TOKEN")
++    if not server or not token:
++        return "Music Assistant search is not configured."
++    if not player_id:
++        return "This Echo needs a Music Assistant player mapping first."
++    if not query or not query.strip():
++        return "Which artist, song, album or playlist would you like?"
++
++    title, kind = parse_query(query)
++    artist = None
++    if kind != MediaType.ARTIST:
++        parts = re.split(r"\s+by\s+", title, maxsplit=1, flags=re.I)
++        if len(parts) == 2:
++            title, artist = parts
++
++    search_text = f"{title} {artist}" if artist else title
++    kinds = [kind] if kind else [
++        MediaType.ARTIST, MediaType.TRACK,
++        MediaType.ALBUM, MediaType.PLAYLIST,
++    ]
++
++    async with aiohttp.ClientSession() as session:
++        async with MusicAssistantClient(server, session, token=token) as client:
++            results = await client.music.search(
++                search_text, media_types=kinds, limit=20
++            )
++            groups = {
++                MediaType.ARTIST: results.artists,
++                MediaType.TRACK: results.tracks,
++                MediaType.ALBUM: results.albums,
++                MediaType.PLAYLIST: results.playlists,
++            }
++            matches = []
++            for media_type in kinds:
++                for item in groups.get(media_type, []):
++                    if normalize(item.name) != normalize(title):
++                        continue
++                    if artist and not any(
++                        normalize(a.name) == normalize(artist)
++                        for a in getattr(item, "artists", [])
++                    ):
++                        continue
++                    matches.append(item)
++
++            # Collapse repeated URIs only; matching names do not establish identity.
++            unique = {}
++            for item in matches:
++                key = item.uri
++                unique.setdefault(key, item)
++            matches = list(unique.values())
++
++            # A bare artist name such as "Ghost" should select that artist.
++            if kind is None and not artist:
++                artists = [i for i in matches
++                           if i.media_type == MediaType.ARTIST]
++                if artists:
++                    matches = artists
++
++            if not matches:
++                return "I found no exact match. Please specify the artist, song, album or playlist."
++            if len(matches) > 1:
++                return "I found several matches. Please include the artist and say whether it is a song, album or playlist."
++
++            item = matches[0]
++            queue = await client.player_queues.get_active_queue(player_id)
++            queue_id = queue.queue_id if queue else player_id
++            await client.player_queues.play_media(
++                queue_id, item.uri, option=QueueOption.REPLACE
++            )
++            return f"Requested {item.name} on {player_id}."
++
++
++def search_and_play(player_id, query):
++    try:
++        return asyncio.run(asyncio.wait_for(
++            _search_and_play(player_id, query), timeout=6
++        ))
++    except asyncio.TimeoutError:
++        return "Music Assistant took too long. Please check playback before trying again."
++    except Exception:
++        logger.exception("Music search or playback request failed")
++        return "I could not complete the music request."
+diff --git a/app/skill/offset_recovery.py b/app/skill/offset_recovery.py
+new file mode 100644
+index 0000000..1d799ee
+--- /dev/null
++++ b/app/skill/offset_recovery.py
+@@ -0,0 +1,108 @@
++"""Forward correlated Alexa failures and stopped offsets to the MA recovery API."""
++import asyncio
++import logging
++import os
++import threading
++import time
++from urllib.parse import unquote, urlsplit
++
++logger = logging.getLogger(__name__)
++_lock = threading.Lock()
++_devices = {}
++
++
++def canonical(token):
++    if not isinstance(token, str):
++        return None
++    parts = urlsplit(token).path.strip('/').split('/')
++    if len(parts) != 5 or parts[0] != 'flow':
++        return None
++    return tuple(unquote(part) for part in parts)
++
++
++def started(device, token):
++    with _lock:
++        state = _devices.setdefault(device, {'generation': 0})
++        state.update(token=canonical(token), generation=state['generation'] + 1,
++                     cancelled=False, failure=None, stopped=None)
++
++
++def cancel(device):
++    with _lock:
++        state = _devices.get(device)
++        if state:
++            state.update(cancelled=True, generation=state['generation'] + 1)
++
++
++def claim(state):
++    failure, stopped = state.get('failure'), state.get('stopped')
++    if (state.get('cancelled', True) or not failure or not stopped
++            or abs(failure[0] - stopped[0]) > 10 or state.get('busy')
++            or state.get('attempted') == (state['generation'], state['token'])):
++        return None
++    state['attempted'] = (state['generation'], state['token'])
++    state['busy'] = True
++    return state['generation'], stopped[1], stopped[2]
++
++
++def event(device, token, offset=None, failure=False):
++    if os.environ.get("ENABLE_ALEXA_OFFSET_RECOVERY", "false").lower() != "true":
++        return
++    key = canonical(token)
++    if key is None:
++        return
++    with _lock:
++        state = _devices.get(device)
++        if not state or state.get('token') != key or state.get('cancelled'):
++            return
++        if failure:
++            state['failure'] = (time.monotonic(),)
++        elif isinstance(offset, int) and not isinstance(offset, bool) and 0 <= offset <= 604800000:
++            state['stopped'] = (time.monotonic(), offset, token)
++        action = claim(state)
++    if action:
++        generation, milliseconds, original_token = action
++        threading.Thread(target=worker, args=(device, key, generation, milliseconds,
++                         original_token), daemon=True, name='alexa-offset-recovery').start()
++
++
++def current(device, key, generation):
++    with _lock:
++        state = _devices.get(device, {})
++        return (not state.get('cancelled', True) and state.get('token') == key
++                and state.get('generation') == generation)
++
++
++async def dispatch(device, key, generation, offset, token):
++    import aiohttp
++    from env_secrets import get_env_secret
++    from music_assistant_client import MusicAssistantClient
++    from .device_mapping import get_player_for_device
++
++    player = get_player_for_device(device)
++    if not player or key[2] != player:
++        logger.warning('Recovery skipped: device mapping does not match failed stream')
++        return
++    async with aiohttp.ClientSession() as session:
++        async with MusicAssistantClient(get_env_secret('MA_API_URL'), session,
++                                        token=get_env_secret('MA_API_TOKEN')) as client:
++            for _ in range(4):
++                if not current(device, key, generation):
++                    return
++                result = await client.send_command('player_queues/recover_alexa_flow',
++                    queue_id=player, stream_path=urlsplit(token).path, offset_ms=offset)
++                logger.warning('Alexa offset recovery result: %s', result)
++                if result.get('reason') != 'timeline_not_finalized':
++                    return
++                await asyncio.sleep(0.5)
++
++
++def worker(device, key, generation, offset, token):
++    try:
++        asyncio.run(asyncio.wait_for(dispatch(device, key, generation, offset, token), 12))
++    except Exception:
++        logger.exception('Alexa recovery failed; expired URL was not replayed')
++    finally:
++        with _lock:
++            if device in _devices:
++                _devices[device]['busy'] = False
+diff --git a/app/skill/util.py b/app/skill/util.py
+index a635aca..501c266 100644
+--- a/app/skill/util.py
++++ b/app/skill/util.py
+@@ -85,7 +85,7 @@ def replace_ip_in_url(url, hostname):
+ def audio_data(request):
+     try:
+         data.get_latest()
+-        return data.info
++        return dict(data.info)
+     except Exception:
+         return
+ 
+diff --git a/docker-compose.portable.yml b/docker-compose.portable.yml
+new file mode 100644
+index 0000000..3fd4344
+--- /dev/null
++++ b/docker-compose.portable.yml
+@@ -0,0 +1,32 @@
++# Candidate compose file. Copy and configure; do not replace an existing deployment blindly.
++services:
++  alexa-skill:
++    build: .
++    restart: unless-stopped
++    ports:
++      - "5000:5000"
++    environment:
++      SKILL_HOSTNAME: ${SKILL_HOSTNAME:?Set your public skill hostname}
++      SKILL_ID: ${SKILL_ID:?Set your Alexa skill id}
++      MA_HOSTNAME: ${MA_HOSTNAME:?Set your public audio hostname}
++      MA_API_URL: ${MA_API_URL:?Set your Music Assistant API base URL}
++      MA_API_TOKEN: /run/secrets/MA_API_TOKEN
++      APP_USERNAME: /run/secrets/APP_USERNAME
++      APP_PASSWORD: /run/secrets/APP_PASSWORD
++      LOCALE: ${LOCALE:-en-GB}
++      ENABLE_ALEXA_OFFSET_RECOVERY: ${ENABLE_ALEXA_OFFSET_RECOVERY:-false}
++      PORT: "5000"
++    volumes:
++      - ./instance_data:/app/instance_data
++      - ./ask_data:/root/.ask
++    secrets:
++      - MA_API_TOKEN
++      - APP_USERNAME
++      - APP_PASSWORD
++secrets:
++  MA_API_TOKEN:
++    file: ./secrets/ma_api_token.txt
++  APP_USERNAME:
++    file: ./secrets/app_username.txt
++  APP_PASSWORD:
++    file: ./secrets/app_password.txt
+diff --git a/tests/portable/test_portable.py b/tests/portable/test_portable.py
+new file mode 100644
+index 0000000..8e73a66
+--- /dev/null
++++ b/tests/portable/test_portable.py
+@@ -0,0 +1,282 @@
++"""Offline regressions using arbitrary players; never contact Alexa or MA."""
++import asyncio
++from concurrent.futures import ThreadPoolExecutor
++import json
++import os
++from pathlib import Path
++import sys
++from threading import Barrier
++from types import SimpleNamespace as N
++import unittest
++from unittest.mock import AsyncMock, MagicMock, patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'app'))
++os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
++os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
++import shared_store
++from flask import Flask, Blueprint
++from music_assistant_api.ma_routes import register_routes
++from skill import data, offset_recovery as recovery, music_search as search, apl, util
++from skill import lambda_function as handlers
++from ask_sdk_core.response_helper import ResponseFactory
++
++
++def stream(player='Attic', session='s', item='i'):
++    from urllib.parse import quote
++    return f'https://audio.example.test/flow/{session}/{quote(player, safe="")}/{item}/{quote(player, safe="")}.mp3'
++
++
++class IsolationTests(unittest.TestCase):
++    def setUp(self):
++        shared_store._players.clear()
++        shared_store._store = None
++        shared_store._version = 0
++        data.begin_request(None)
++        self.app = Flask(__name__)
++        bp = Blueprint('ma', __name__)
++        register_routes(bp)
++        self.app.register_blueprint(bp)
++
++    def push(self, player, title):
++        with self.app.test_client() as client:
++            response = client.post('/push-url', json={'streamUrl': stream(player), 'title': title})
++            self.assertEqual(response.status_code, 200)
++
++    def test_alternating_players_keep_own_stream_and_artwork(self):
++        self.push('Attic', 'First')
++        self.push('Patio speaker', 'Second')
++        for player, title in [('Attic', 'First'), ('Patio speaker', 'Second'), ('Attic', 'First')]:
++            data.begin_request(player)
++            audio = util.audio_data(None)
++            self.assertEqual(audio['primaryText'], title)
++            self.assertEqual(audio['audioSources'], stream(player))
++            self.assertEqual(apl._get_metadata()['primaryText'], title)
++
++    def test_parallel_requests_do_not_share_metadata(self):
++        self.push('Attic', 'First')
++        self.push('Patio speaker', 'Second')
++        barrier = Barrier(2)
++        def read(player):
++            data.begin_request(player)
++            data.get_latest()
++            barrier.wait(timeout=5)
++            return dict(data.info)
++        with ThreadPoolExecutor(max_workers=2) as pool:
++            first, second = list(pool.map(read, ['Attic', 'Patio speaker']))
++        self.assertEqual(first['primaryText'], 'First')
++        self.assertEqual(second['primaryText'], 'Second')
++
++    def test_missing_mapping_or_player_never_falls_back(self):
++        self.push('Attic', 'First')
++        for player in (None, 'Missing'):
++            data.begin_request(player)
++            with patch('urllib.request.urlopen', side_effect=AssertionError('Unscoped HTTP fallback')):
++                self.assertFalse(data.get_latest()['changed'])
++            self.assertEqual(dict(data.info), {})
++            self.assertIsNone(apl._get_metadata())
++
++    def test_unknown_publication_cannot_replace_mapped_stream(self):
++        self.push('Attic', 'First')
++        shared_store.publish({'streamUrl': 'https://audio.example.test/unidentified.mp3'})
++        data.begin_request('Attic')
++        self.assertEqual(util.audio_data(None)['primaryText'], 'First')
++
++    def test_announcement_stays_with_player(self):
++        self.push('Attic', 'First')
++        self.push('Patio speaker', 'Second')
++        shared_store.publish({'streamUrl': 'https://audio.example.test/announcement/Attic.mp3', 'title': 'Announcement'})
++        self.assertEqual(shared_store.latest('Patio speaker')['title'], 'Second')
++        self.assertEqual(shared_store.latest('Attic')['title'], 'Announcement')
++
++    def test_flow_player_filename_mismatch_is_not_indexed(self):
++        self.assertIsNone(shared_store.player_from_url(stream().replace('/Attic.mp3', '/Other.mp3')))
++
++    def test_unicode_and_escaped_names(self):
++        for player in ('Büro', 'Studio & den', "Someone's Echo"):
++            self.assertEqual(shared_store.player_from_url(stream(player)), player)
++
++    def test_request_interceptor_selects_mapping(self):
++        fake = N()
++        with patch.object(handlers, '_device_id_from', return_value='opaque-123'), patch.object(handlers.device_mapping, 'get_player_for_device', return_value='Attic'):
++            handlers.PlayerContextInterceptor().process(fake)
++        self.assertEqual(shared_store.request_player.get(), 'Attic')
++
++    def test_launch_has_no_global_escape_hatch(self):
++        self.push('Attic', 'First')
++        fake = N(request_envelope=N(request=N()), attributes_manager=N(request_attributes={'_': lambda x: x}), response_builder=ResponseFactory())
++        data.begin_request('Missing')
++        with patch.object(handlers, '_device_id_from', return_value='other'), patch.object(util, 'play') as play:
++            handlers.LaunchRequestOrPlayAudioHandler().handle(fake)
++        play.assert_not_called()
++
++
++class RecoveryTests(unittest.TestCase):
++    def setUp(self):
++        recovery._devices.clear()
++        self.enabled = patch.dict(os.environ, {'ENABLE_ALEXA_OFFSET_RECOVERY': 'true'})
++        self.enabled.start()
++        self.addCleanup(self.enabled.stop)
++
++    def events(self, device, token):
++        recovery.event(device, token, failure=True)
++        recovery.event(device, token, 45000)
++
++    def test_both_callback_orders_and_duplicate_once(self):
++        for reverse in (False, True):
++            recovery._devices.clear()
++            recovery.started('device', stream())
++            with patch.object(recovery.threading, 'Thread') as thread:
++                if reverse:
++                    recovery.event('device', stream(), 45000)
++                    recovery.event('device', stream(), failure=True)
++                else:
++                    self.events('device', stream())
++                self.events('device', stream())
++                thread.assert_called_once()
++
++    def test_stopped_alone_never_recovers(self):
++        recovery.started('device', stream())
++        with patch.object(recovery.threading, 'Thread') as thread:
++            recovery.event('device', stream(), 45000)
++            thread.assert_not_called()
++
++    def test_pause_cancellation_blocks_late_events(self):
++        recovery.started('device', stream())
++        recovery.cancel('device')
++        with patch.object(recovery.threading, 'Thread') as thread:
++            self.events('device', stream())
++            thread.assert_not_called()
++
++    def test_new_stream_invalidates_old_failure(self):
++        recovery.started('device', stream())
++        recovery.started('device', stream(session='new'))
++        with patch.object(recovery.threading, 'Thread') as thread:
++            self.events('device', stream())
++            thread.assert_not_called()
++
++    def test_two_devices_do_not_share_generation_or_callbacks(self):
++        recovery.started('one', stream('Attic'))
++        recovery.started('two', stream('Patio'))
++        recovery.cancel('one')
++        with patch.object(recovery.threading, 'Thread') as thread:
++            self.events('one', stream('Attic'))
++            self.events('two', stream('Patio'))
++            self.assertEqual(thread.call_args.kwargs['args'][0], 'two')
++            thread.assert_called_once()
++
++    def test_disabled_on_standard_server(self):
++        recovery.started('device', stream())
++        with patch.dict(os.environ, {'ENABLE_ALEXA_OFFSET_RECOVERY': 'false'}), patch.object(recovery.threading, 'Thread') as thread:
++            self.events('device', stream())
++            thread.assert_not_called()
++
++    def test_invalid_positions_do_not_dispatch(self):
++        for offset in (-1, True, 604800001, '123'):
++            recovery._devices.clear()
++            recovery.started('device', stream())
++            with patch.object(recovery.threading, 'Thread') as thread:
++                recovery.event('device', stream(), failure=True)
++                recovery.event('device', stream(), offset)
++                thread.assert_not_called()
++
++    def test_mismatched_player_cannot_dispatch(self):
++        recovery.started('device', stream())
++        with patch('skill.device_mapping.get_player_for_device', return_value='Other'), patch('music_assistant_client.MusicAssistantClient') as client:
++            asyncio.run(recovery.dispatch('device', recovery.canonical(stream()), 1, 45000, stream()))
++            client.assert_not_called()
++
++
++class SearchTests(unittest.IsolatedAsyncioTestCase):
++    def item(self, name='Any Artist', uri='library://artist/123'):
++        return N(name=name, uri=uri, media_type=search.MediaType.ARTIST, artists=[], version='')
++
++    async def run_search(self, items, query='songs by Any Artist'):
++        client = MagicMock()
++        client.music.search = AsyncMock(return_value=N(artists=items, tracks=[], albums=[], playlists=[]))
++        client.player_queues.get_active_queue = AsyncMock(return_value=N(queue_id='arbitrary-player'))
++        client.player_queues.play_media = AsyncMock()
++        manager = MagicMock()
++        manager.__aenter__ = AsyncMock(return_value=client)
++        manager.__aexit__ = AsyncMock(return_value=False)
++        with patch.object(search, 'get_env_secret', return_value='configured'), patch.object(search, 'MusicAssistantClient', return_value=manager):
++            reply = await search._search_and_play('arbitrary-player', query)
++        return client, reply
++
++    async def test_artist_search_replaces_only_requested_queue(self):
++        client, reply = await self.run_search([self.item()])
++        client.player_queues.play_media.assert_awaited_once_with('arbitrary-player', 'library://artist/123', option=search.QueueOption.REPLACE)
++        self.assertIn('Any Artist', reply)
++
++    async def test_distinct_same_name_artists_are_ambiguous(self):
++        client, reply = await self.run_search([self.item(uri='provider://artist/a'), self.item(uri='provider://artist/b')])
++        client.player_queues.play_media.assert_not_awaited()
++        self.assertIn('several matches', reply)
++
++    async def test_no_exact_match_does_not_replace_music(self):
++        client, _ = await self.run_search([self.item('Other artist')])
++        client.player_queues.play_media.assert_not_awaited()
++
++    async def test_repeated_uri_deduplicated(self):
++        client, _ = await self.run_search([self.item(), self.item()])
++        client.player_queues.play_media.assert_awaited_once()
++
++    def test_all_english_models_keep_transport_separate(self):
++        root = Path(__file__).resolve().parents[2]
++        for locale in ('en-AU', 'en-CA', 'en-GB', 'en-IN', 'en-US'):
++            model = json.loads((root / f'app/models/{locale}.json').read_text())
++            intents = model['interactionModel']['languageModel']['intents']
++            intent = next(i for i in intents if i['name'] == 'SearchMusicIntent')
++            self.assertIn('play songs by {query}', intent['samples'])
++            self.assertNotIn('play {query}', intent['samples'])
++            self.assertTrue(next(i for i in intents if i['name'] == 'PlayAudio'))
++
++
++class PairingTests(unittest.TestCase):
++    def setUp(self):
++        from endpoints.devices import devices_bp
++        self.app = Flask(__name__)
++        self.app.register_blueprint(devices_bp)
++
++    def test_save_success_is_visible(self):
++        with self.app.test_client() as client, patch('skill.device_mapping.set_player_for_device', return_value=True), patch('skill.device_mapping.load_mapping', return_value={}):
++            response = client.post('/devices', data={'device_id': 'opaque', 'player_id': 'Attic'}, follow_redirects=True)
++        self.assertIn(b'Mapping saved.', response.data)
++
++    def test_save_error_is_not_reported_as_success(self):
++        with self.app.test_client() as client, patch('skill.device_mapping.set_player_for_device', return_value=False):
++            response = client.post('/devices', data={'device_id': 'opaque', 'player_id': 'Attic'})
++        self.assertEqual(response.status_code, 500)
++        self.assertNotIn(b'Mapping saved.', response.data)
++
++
++class DispatchTests(unittest.IsolatedAsyncioTestCase):
++    async def test_recovery_uses_mapped_player_offset_and_failed_stream(self):
++        recovery._devices.clear()
++        token = stream('Attic')
++        recovery.started('opaque', token)
++        client = MagicMock()
++        client.send_command = AsyncMock(return_value={'ok': True})
++        manager = MagicMock()
++        manager.__aenter__ = AsyncMock(return_value=client)
++        manager.__aexit__ = AsyncMock(return_value=False)
++        with patch('skill.device_mapping.get_player_for_device', return_value='Attic'), patch('env_secrets.get_env_secret', return_value='configured'), patch('music_assistant_client.MusicAssistantClient', return_value=manager):
++            await recovery.dispatch('opaque', recovery.canonical(token), 1, 45000, token)
++        client.send_command.assert_awaited_once_with('player_queues/recover_alexa_flow', queue_id='Attic', stream_path='/flow/s/Attic/i/Attic.mp3', offset_ms=45000)
++
++    async def test_cancelled_generation_never_sends_command(self):
++        recovery._devices.clear()
++        token = stream('Attic')
++        recovery.started('opaque', token)
++        recovery.cancel('opaque')
++        client = MagicMock()
++        client.send_command = AsyncMock()
++        manager = MagicMock()
++        manager.__aenter__ = AsyncMock(return_value=client)
++        manager.__aexit__ = AsyncMock(return_value=False)
++        with patch('skill.device_mapping.get_player_for_device', return_value='Attic'), patch('env_secrets.get_env_secret', return_value='configured'), patch('music_assistant_client.MusicAssistantClient', return_value=manager):
++            await recovery.dispatch('opaque', recovery.canonical(token), 1, 45000, token)
++        client.send_command.assert_not_awaited()
++
++
++if __name__ == '__main__':
++    unittest.main()
+-- 
+2.56.1
+
