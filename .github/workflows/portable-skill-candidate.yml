@@ -29,6 +29,8 @@ jobs:
         run: |
           git apply --check ../bundle/contrib/alexa-skill/portable-search-recovery.patch
           git apply ../bundle/contrib/alexa-skill/portable-search-recovery.patch
+          git apply --check ../bundle/contrib/alexa-skill/pairing-player-picker.patch
+          git apply ../bundle/contrib/alexa-skill/pairing-player-picker.patch
           git diff --check
       - run: python -m pip install -r skill/app/requirements.txt
       - run: python -m compileall -q skill/app

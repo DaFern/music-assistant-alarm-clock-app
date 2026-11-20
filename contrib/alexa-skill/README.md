@@ -58,3 +58,30 @@ This candidate branch does not change the live NAS skill, Alexa cloud model,
 Home Assistant app configuration, main branch or published app version. It does
 not make Music Assistant a selectable Alexa default music service. Translated
 models beyond English and a dedicated skill fork/upstream PR are follow-up work.
+
+## Follow-up: verified player picker
+
+Apply `pairing-player-picker.patch` **after** the original portable patch, in the
+same fresh checkout. This adds a player dropdown with names, exact IDs and
+availability. Saves validate the ID against a fresh MA player list; an unreachable
+server cannot silently replace an existing mapping. Unavailable-but-known players
+may be paired for later use. Voice search now explains when a speaker is unavailable.
+Directory requests are read-only and limited to five seconds.
+
+```sh
+git apply --check /path/to/pairing-player-picker.patch
+git apply /path/to/pairing-player-picker.patch
+.venv/bin/python -m unittest discover -s tests/portable -v
+```
+
+The combined source passes **37 offline tests** (the original 26 plus 11 picker,
+directory and error-message regressions). Compilation and whitespace checks pass.
+The follow-up is source-only and has not been installed on the NAS; keep the
+current dropout trial running until a later maintenance window. Existing mapping
+files are preserved and need no migration. Automatic device identification is not
+added: users still trigger a request from each Echo to identify its row.
+
+For testing inside a built image, mount tests at `/app/tests` (beside `/app/app`),
+set `PYTHONPATH=/app/app`, and discover `/app/tests/portable`. Mounting at `/tests`
+breaks the locale-file assertions; the test layout expects the application and
+tests to share a parent directory.

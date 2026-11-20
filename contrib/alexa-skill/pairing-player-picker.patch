@@ -1,0 +1,340 @@
+From 531ac13e85163d8c2929987dda87feddcf6a7f5a Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 20 Nov 2026 21:41:57 +0000
+Subject: [PATCH] Offer verified MA players in Echo pairing dropdown
+
+---
+ PORTABLE_SETUP.md                        |  11 ++-
+ app/endpoints/devices.py                 |  36 ++++++-
+ app/skill/music_search.py                |   3 +
+ app/skill/player_directory.py            |  47 +++++++++
+ tests/portable/test_pairing_directory.py | 119 +++++++++++++++++++++++
+ tests/portable/test_portable.py          |   3 +
+ 6 files changed, 211 insertions(+), 8 deletions(-)
+ create mode 100644 app/skill/player_directory.py
+ create mode 100644 tests/portable/test_pairing_directory.py
+
+diff --git a/PORTABLE_SETUP.md b/PORTABLE_SETUP.md
+index 2ec4a66..fba7395 100644
+--- a/PORTABLE_SETUP.md
++++ b/PORTABLE_SETUP.md
+@@ -61,10 +61,13 @@ bounds prevent loops; they do not cure the cause of a broken stream.
+    and existing skill setup as described in the main README. Keep authenticated
+    management routes protected; Alexa's signed invocation endpoint must still
+    be reachable by Amazon.
+-5. From **each Echo**, invoke your skill's help, refresh `/devices`, then pair the
+-   newly seen opaque Alexa device ID with that Echo's exact MA `player_id`.
+-   Display names are not guaranteed to equal IDs. The save confirms persistence,
+-   not that the ID exists or that playback works. No automatic room-name matching
++5. From **each Echo**, invoke your skill's help, refresh `/devices`, then select that Echo's player from the dropdown. Each option shows the
++   name, availability and exact MA `player_id`, so similar names remain distinct.
++   Saving rechecks the selected ID against MA before persisting it. A successful
++   save confirms that the ID exists and the mapping was written, not that playback
++   works. Unavailable players can be paired for later use. If MA is unreachable,
++   existing mappings stay visible and the form cannot save a replacement; reload
++   to retry. An explicit unpair request does not need a server connection. No automatic room-name matching
+    is attempted. Pair direct Echo players, not a tablet or unrelated group.
+ 6. Upload/build the corresponding locale's interaction model using your existing
+    skill setup or Alexa Developer Console. Search samples are included for all
+diff --git a/app/endpoints/devices.py b/app/endpoints/devices.py
+index 1447dfa..9fc5d0e 100644
+--- a/app/endpoints/devices.py
++++ b/app/endpoints/devices.py
+@@ -4,6 +4,7 @@ from pathlib import Path
+ from datetime import datetime
+ 
+ from skill import device_mapping
++from skill.player_directory import list_players, PlayerDirectoryError
+ 
+ devices_bp = Blueprint('devices_bp', __name__)
+ 
+@@ -63,6 +64,12 @@ def _format_ts(ts):
+ def devices_page():
+     mapping = device_mapping.load_mapping()
+     seen = _seen_devices()
++    directory_error = None
++    try:
++        players = list_players()
++    except PlayerDirectoryError as error:
++        players = None
++        directory_error = str(error)
+ 
+     all_device_ids = sorted(set(mapping.keys()) | set(seen.keys()),
+                              key=lambda d: -(seen.get(d, {}).get('last_seen') or 0))
+@@ -71,6 +78,18 @@ def devices_page():
+     for device_id in all_device_ids:
+         info = seen.get(device_id, {})
+         current_player = mapping.get(device_id, '')
++        options = ['<option value="">Unpaired</option>']
++        found = False
++        for player in players or []:
++            selected = ' selected' if player['player_id'] == current_player else ''
++            found = found or bool(selected)
++            availability = 'Available' if player['available'] else 'Unavailable'
++            label = f"{player['name']} — {availability} [{player['player_id']}]"
++            options.append(f'<option value="{escape(player["player_id"])}"{selected}>{escape(label)}</option>')
++        if current_player and not found:
++            options.append(f'<option value="{escape(current_player)}" selected>{escape(current_player)} — Saved; not returned by Music Assistant</option>')
++        choices = ''.join(options)
++        disabled = ' disabled' if directory_error else ''
+         rows.append(f"""
+         <tr>
+             <td><code title="{escape(device_id)}">{escape(device_id[-12:])}</code></td>
+@@ -79,9 +98,8 @@ def devices_page():
+             <td>
+                 <form method="POST" action="/devices" class="mapping-form">
+                     <input type="hidden" name="device_id" value="{escape(device_id)}">
+-                    <input type="text" name="player_id" value="{escape(current_player)}"
+-                           placeholder="MA player_id (e.g. Studio)">
+-                    <button type="submit">Save</button>
++                    <select name="player_id" aria-label="Music Assistant player"{disabled}>{choices}</select>
++                    <button type="submit"{disabled}>Save</button>
+                 </form>
+             </td>
+         </tr>""")
+@@ -89,11 +107,14 @@ def devices_page():
+     rows_html = '\n'.join(rows) or '<tr><td colspan="4" class="muted">No devices seen yet. Trigger an intent from each Echo, then reload this page.</td></tr>'
+ 
+     confirmation = '<p role="status">Mapping saved.</p>' if request.args.get("saved") == "1" else ""
++    warning = f'<p role="alert">{escape(directory_error)} Reload to try again.</p>' if directory_error else ''
+     body = f"""
+     {confirmation}
++    {warning}
+     <p class="muted">Alexa does not expose a friendly device name to Custom Skills, only an opaque per-device id.
+     Trigger any voice command (e.g. "next") from each Echo you want to control MA from, reload this page,
+-    then pair each device id with its Music Assistant player_id (the name shown in MA, e.g. "Studio").
++    then select its matching player below. Availability is checked when this page loads.
++    Duplicate display names include their exact player IDs. Unavailable players may be paired for later use.
+     Search, track controls and optional offset recovery use this mapping. Pair every Echo once.</p>
+     <table>
+         <thead><tr><th>Device id (last 12 chars)</th><th>Last seen</th><th>Last request</th><th>MA player_id</th></tr></thead>
+@@ -119,6 +140,13 @@ def devices_save():
+     player_id = (request.form.get('player_id') or '').strip()
+     if not device_id:
+         return Response("Missing device id.", status=400)
++    if player_id:
++        try:
++            players = list_players()
++        except PlayerDirectoryError as error:
++            return Response(str(error), status=503, mimetype='text/plain')
++        if player_id not in {player['player_id'] for player in players}:
++            return Response("That player is not listed by Music Assistant. Reload the devices page and select a player. Mapping unchanged.", status=400)
+     if not device_mapping.set_player_for_device(device_id, player_id or None):
+         return Response("Mapping could not be saved. Check persistent storage permissions.", status=500)
+     return redirect(url_for('devices_bp.devices_page', saved="1"))
+diff --git a/app/skill/music_search.py b/app/skill/music_search.py
+index 82c623d..68ae960 100644
+--- a/app/skill/music_search.py
++++ b/app/skill/music_search.py
+@@ -7,6 +7,7 @@ import unicodedata
+ import aiohttp
+ from music_assistant_client import MusicAssistantClient
+ from music_assistant_models.enums import MediaType, QueueOption
++from music_assistant_models.errors import PlayerUnavailableError
+ from env_secrets import get_env_secret
+ 
+ logger = logging.getLogger(__name__)
+@@ -112,6 +113,8 @@ def search_and_play(player_id, query):
+         return asyncio.run(asyncio.wait_for(
+             _search_and_play(player_id, query), timeout=6
+         ))
++    except PlayerUnavailableError:
++        return "That speaker is unavailable in Music Assistant. Check its connection and the player selected on the devices page."
+     except asyncio.TimeoutError:
+         return "Music Assistant took too long. Please check playback before trying again."
+     except Exception:
+diff --git a/app/skill/player_directory.py b/app/skill/player_directory.py
+new file mode 100644
+index 0000000..8ee450d
+--- /dev/null
++++ b/app/skill/player_directory.py
+@@ -0,0 +1,47 @@
++"""Read the authorized MA player directory without sending playback commands."""
++import asyncio
++
++import aiohttp
++from music_assistant_client import MusicAssistantClient
++from env_secrets import get_env_secret
++
++
++class PlayerDirectoryError(Exception):
++    """The authoritative player list could not be retrieved."""
++
++
++async def _fetch_players():
++    server = get_env_secret("MA_API_URL")
++    token = get_env_secret("MA_API_TOKEN")
++    if not server or not token:
++        raise PlayerDirectoryError("Music Assistant API settings are missing.")
++    async with aiohttp.ClientSession() as session:
++        async with MusicAssistantClient(server, session, token=token) as client:
++            values = await client.send_command("players/all")
++    if not isinstance(values, list):
++        raise PlayerDirectoryError("Music Assistant returned an invalid player list.")
++    players = {}
++    for value in values:
++        if not isinstance(value, dict):
++            continue
++        player_id = value.get("player_id")
++        if not isinstance(player_id, str) or not player_id:
++            continue
++        name = value.get("name")
++        players[player_id] = {
++            "player_id": player_id,
++            "name": name if isinstance(name, str) and name else player_id,
++            "available": value.get("available") is True,
++        }
++    return sorted(players.values(), key=lambda player: (player["name"].casefold(), player["player_id"]))
++
++
++def list_players():
++    """Return a fresh list visible to the configured token, bounded to five seconds."""
++    try:
++        return asyncio.run(asyncio.wait_for(_fetch_players(), timeout=5))
++    except PlayerDirectoryError:
++        raise
++    except Exception:
++        # Do not embed URLs, credentials or server exception text in the web response.
++        raise PlayerDirectoryError("Could not reach Music Assistant. Existing mappings are unchanged.") from None
+diff --git a/tests/portable/test_pairing_directory.py b/tests/portable/test_pairing_directory.py
+new file mode 100644
+index 0000000..4caa26d
+--- /dev/null
++++ b/tests/portable/test_pairing_directory.py
+@@ -0,0 +1,119 @@
++"""Directory selection regressions. No credentials, playback or external I/O."""
++import asyncio
++import os
++from pathlib import Path
++import sys
++from types import SimpleNamespace as N
++import unittest
++from unittest.mock import AsyncMock, MagicMock, patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'app'))
++from flask import Flask
++from endpoints.devices import devices_bp
++from skill import player_directory as directory, music_search
++from music_assistant_models.errors import PlayerUnavailableError
++
++
++class DropdownTests(unittest.TestCase):
++    def setUp(self):
++        self.app = Flask(__name__)
++        self.app.register_blueprint(devices_bp)
++        self.mapping = patch('skill.device_mapping.load_mapping', return_value={'echo': "Kid's speaker"})
++        self.mapping.start()
++        self.addCleanup(self.mapping.stop)
++        self.players = [
++            {'player_id': "Kid's speaker", 'name': 'Bedroom', 'available': False},
++            {'player_id': 'Patio-ID', 'name': 'Garden', 'available': True},
++        ]
++
++    def test_dropdown_uses_exact_ids_and_shows_availability(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', return_value=self.players):
++            page = client.get('/devices').get_data(as_text=True)
++        self.assertIn('<select name="player_id"', page)
++        self.assertIn('value="Kid&#39;s speaker" selected', page)
++        self.assertIn('Bedroom — Unavailable', page)
++        self.assertIn('Garden — Available', page)
++        self.assertIn('value="Patio-ID"', page)
++        self.assertNotIn('type="text" name="player_id"', page)
++
++    def test_unknown_saved_mapping_remains_visible(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', return_value=[]):
++            page = client.get('/devices').get_data(as_text=True)
++        self.assertIn('Kid&#39;s speaker', page)
++        self.assertIn('Saved; not returned by Music Assistant', page)
++
++    def test_outage_does_not_offer_an_empty_replacement_or_save(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', side_effect=directory.PlayerDirectoryError('Connection failed')):
++            page = client.get('/devices').get_data(as_text=True)
++        self.assertIn('Connection failed', page)
++        self.assertIn('Kid&#39;s speaker', page)
++        self.assertIn('<button type="submit" disabled>', page)
++
++    def test_typed_nonexistent_id_is_rejected_without_write(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', return_value=self.players), patch('skill.device_mapping.set_player_for_device') as save:
++            response = client.post('/devices', data={'device_id': 'echo', 'player_id': 'Kids speaker'})
++        self.assertEqual(response.status_code, 400)
++        save.assert_not_called()
++
++    def test_server_outage_rejects_save_without_write(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', side_effect=directory.PlayerDirectoryError('Connection failed')), patch('skill.device_mapping.set_player_for_device') as save:
++            response = client.post('/devices', data={'device_id': 'echo', 'player_id': 'Patio-ID'})
++        self.assertEqual(response.status_code, 503)
++        save.assert_not_called()
++
++    def test_unavailable_but_real_player_can_be_paired(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', return_value=self.players) as fetch, patch('skill.device_mapping.set_player_for_device', return_value=True) as save:
++            response = client.post('/devices', data={'device_id': 'echo', 'player_id': "Kid's speaker"})
++        self.assertEqual(response.status_code, 302)
++        save.assert_called_once_with('echo', "Kid's speaker")
++        fetch.assert_called_once_with()
++
++    def test_explicit_unpair_does_not_require_server_connection(self):
++        with self.app.test_client() as client, patch('endpoints.devices.list_players') as fetch, patch('skill.device_mapping.set_player_for_device', return_value=True) as save:
++            response = client.post('/devices', data={'device_id': 'echo', 'player_id': ''})
++        self.assertEqual(response.status_code, 302)
++        fetch.assert_not_called()
++        save.assert_called_once_with('echo', None)
++
++    def test_names_and_ids_are_html_escaped(self):
++        players = [{'player_id': '"><script>bad</script>', 'name': '<img src=x>', 'available': True}]
++        with self.app.test_client() as client, patch('endpoints.devices.list_players', return_value=players):
++            page = client.get('/devices').get_data(as_text=True)
++        self.assertNotIn('<script>bad', page)
++        self.assertNotIn('<img src=x>', page)
++        self.assertIn('&lt;img', page)
++
++
++class DirectoryTests(unittest.IsolatedAsyncioTestCase):
++    async def test_directory_reads_only_players_command_and_normalizes_values(self):
++        client = MagicMock()
++        client.send_command = AsyncMock(return_value=[
++            {'player_id': 'id-2', 'name': 'Patio', 'available': True},
++            {'player_id': 'id-1', 'name': '', 'available': False},
++            {'player_id': 'id-2', 'name': 'Garden', 'available': True},
++            {'name': 'No id'}, None,
++        ])
++        manager = MagicMock()
++        manager.__aenter__ = AsyncMock(return_value=client)
++        manager.__aexit__ = AsyncMock(return_value=False)
++        with patch.object(directory, 'get_env_secret', return_value='configured'), patch.object(directory, 'MusicAssistantClient', return_value=manager):
++            players = await directory._fetch_players()
++        self.assertEqual([p['player_id'] for p in players], ['id-2', 'id-1'])
++        self.assertEqual(players[1]['name'], 'id-1')
++        client.send_command.assert_awaited_once_with('players/all')
++
++    async def test_missing_config_never_connects(self):
++        with patch.object(directory, 'get_env_secret', return_value=None), patch.object(directory, 'MusicAssistantClient') as connect:
++            with self.assertRaises(directory.PlayerDirectoryError):
++                await directory._fetch_players()
++        connect.assert_not_called()
++
++
++class FriendlyErrorTests(unittest.TestCase):
++    def test_unavailable_player_has_actionable_voice_response(self):
++        async def fail(*args):
++            raise PlayerUnavailableError('Unavailable')
++        with patch.object(music_search, '_search_and_play', side_effect=fail):
++            message = music_search.search_and_play('any-player', 'any artist')
++        self.assertIn('speaker is unavailable', message)
++        self.assertIn('devices page', message)
+diff --git a/tests/portable/test_portable.py b/tests/portable/test_portable.py
+index 8e73a66..807f464 100644
+--- a/tests/portable/test_portable.py
++++ b/tests/portable/test_portable.py
+@@ -236,6 +236,9 @@ class PairingTests(unittest.TestCase):
+         from endpoints.devices import devices_bp
+         self.app = Flask(__name__)
+         self.app.register_blueprint(devices_bp)
++        directory = patch('endpoints.devices.list_players', return_value=[{'player_id': 'Attic', 'name': 'Top floor', 'available': True}])
++        directory.start()
++        self.addCleanup(directory.stop)
+ 
+     def test_save_success_is_visible(self):
+         with self.app.test_client() as client, patch('skill.device_mapping.set_player_for_device', return_value=True), patch('skill.device_mapping.load_mapping', return_value={}):
+-- 
+2.56.1
+
