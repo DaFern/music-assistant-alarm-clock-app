@@ -40,9 +40,10 @@ jobs:
           ma-alexa-recovery-check -m unittest discover -s tests/alexa_offset -p 'test*.py' -v
       - name: Run alarm regression suite in actual app runtime
         run: >-
-          docker run --rm --entrypoint python
+          docker run --rm --entrypoint sh
           -v "$PWD/alarm-project:/workspace:ro" -w /workspace
-          ma-alexa-recovery-check -B -m unittest discover -s tests -p 'test_*.py' -q
+          ma-alexa-recovery-check -c
+          "mkdir -p /data/v2/cache/opencode && python -B -m unittest discover -s tests -p 'test_*.py' -q"
       - name: Verify installed alarm commands match tested templates
         run: >-
           docker run --rm --entrypoint python
