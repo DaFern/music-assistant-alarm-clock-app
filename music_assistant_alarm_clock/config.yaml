@@ -1,5 +1,5 @@
-name: MA – HA Alarm Clock
-version: 2.10.12-alarmclock.7
+name: "Music Assistant"
+version: "2.10.12-alarmclock.8"
 slug: music_assistant_alarm_clock
 boot: manual
 description: Music Assistant 2.10.12 with the tested HA Alarm Clock companion and Plex Connect backport.
@@ -18,8 +18,8 @@ host_network: true
 ingress: true
 ingress_port: 8094
 audio: true
-panel_icon: mdi:alarm
-panel_title: MA – HA Alarm Clock
+panel_icon: mdi:music-assistant
+panel_title: "Music Assistant"
 panel_admin: false
 uart: false
 apparmor: true

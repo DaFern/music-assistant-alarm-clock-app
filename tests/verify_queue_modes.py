@@ -23,4 +23,9 @@ for name, body in expected.items():
     assert installed.get(name) == body, f"Installed method differs: {name}"
 assert callable(PlayerQueuesController.recover_alexa_flow)
 assert "remember_flow(" in inspect.getsource(audio)
+manifest = Path("/workspace/music_assistant_alarm_clock/config.yaml").read_text()
+assert 'name: "Music Assistant"' in manifest
+assert 'panel_title: "Music Assistant"' in manifest
+assert "panel_icon: mdi:music-assistant" in manifest
+assert "slug: music_assistant_alarm_clock" in manifest
 print("All tested alarm methods and Alexa recovery hooks verified")

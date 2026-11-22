@@ -1,3 +1,10 @@
+# Music Assistant — 2.10.12-alarmclock.8
+
+The app and sidebar now use the Music Assistant name and icon. Alarm setup,
+editing and playback messages refer to Music Assistant instead of a development
+server. The existing app slug, data, queue handling and Alexa recovery patches
+are unchanged.
+
 # Repeat/Autoplay compatibility — 2.10.12-alarmclock.7
 
 Scheduled alarm playback temporarily suspends enabled Repeat/Autoplay settings,
