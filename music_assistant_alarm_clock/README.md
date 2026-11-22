@@ -1,3 +1,22 @@
+# Repeat/Autoplay compatibility — 2.10.12-alarmclock.7
+
+Scheduled alarm playback temporarily suspends enabled Repeat/Autoplay settings,
+then conditionally restores the saved values on Snooze/Stop or guarded cleanup.
+Matching HA integration source: `DaFern/HA-Alarm-Clock@8606f2d`.
+The installed server advertises `queue_mode_lease`. The legacy experimental test
+still requires those modes off. Grouping and ambient overlays remain unsupported.
+
+This build retains the exact base image, Alexa recovery API and timeline patches
+from .6. The new controller templates are pinned by commit and SHA256, downloaded
+only during image build, and applied only after verifying the complete .6
+controller hash. No data migration or provider-setting change is included.
+
+Before updating, back up the existing app. Updating restarts Music Assistant and
+interrupts playback; choose a time without an active alarm. After updating,
+the matching HA integration still needs deployment and a separately approved Core
+restart. Verify actual bedroom playback and mode restoration; CI is not physical
+acceptance. Retain the .6 backup/build for rollback.
+
 # Alexa timeline recovery — 2.10.12-alarmclock.6
 
 Promoted from tested candidate commit `52da456d2182b047ea109db4c5f5d53dbc4fb6ef`.

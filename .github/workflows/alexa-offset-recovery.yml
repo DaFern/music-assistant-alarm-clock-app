@@ -10,10 +10,20 @@ permissions:
   contents: read
 jobs:
   native-amd64-build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaFern/HA-Alarm-Clock
+          ref: 8606f2db0f496d989ffa59b4695a514b313f3f3b
+          path: alarm-project
+          persist-credentials: false
       - name: Build hash-guarded recovery app
         run: docker build -t ma-alexa-recovery-check music_assistant_alarm_clock
       - name: Check installed recovery API import
@@ -28,3 +38,13 @@ jobs:
         run: >-
           docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace
           ma-alexa-recovery-check -m unittest discover -s tests/alexa_offset -p 'test*.py' -v
+      - name: Run alarm regression suite in actual app runtime
+        run: >-
+          docker run --rm --entrypoint python
+          -v "$PWD/alarm-project:/workspace:ro" -w /workspace
+          ma-alexa-recovery-check -B -m unittest discover -s tests -p 'test_*.py' -q
+      - name: Verify installed alarm commands match tested templates
+        run: >-
+          docker run --rm --entrypoint python
+          -v "$PWD:/workspace:ro" -w /workspace
+          ma-alexa-recovery-check tests/verify_queue_modes.py
