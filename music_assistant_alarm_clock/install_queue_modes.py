@@ -20,6 +20,46 @@ def candidate(raw, alarms, tests):
     before, commands = source.split(start)
     _, after = commands.split(end)
     updated = before + tests + "\n" + alarms + "\n" + end + after
+    # Preserve existing recovery hooks and cancel-before-dispatch behaviour, but
+    # retain the exact alarm's external Stop/Pause intent across ownership loss.
+    replacements = (
+        (
+            "        self._check_player_permission(queue_id)\n"
+            "        self.mass.streams.audio.briefings.cancel_queue(queue_id)\n"
+            "        await self._handle_stop(queue_id)",
+            "        self._check_player_permission(queue_id)\n"
+            "        alarm_command = self._capture_alarm_external_command(queue_id)\n"
+            "        self.mass.streams.audio.briefings.cancel_queue(queue_id)\n"
+            "        alarm_command_succeeded = False\n"
+            "        try:\n"
+            "            await self._handle_stop(queue_id)\n"
+            "            alarm_command_succeeded = True\n"
+            "        finally:\n"
+            "            self._confirm_alarm_external_command(alarm_command, alarm_command_succeeded)",
+        ),
+        (
+            "        self._check_player_permission(queue_id)\n"
+            "        self.mass.streams.audio.briefings.cancel_queue(queue_id)\n"
+            "        # cancel any pending play_index calls for this queue to prevent conflicts",
+            "        self._check_player_permission(queue_id)\n"
+            "        alarm_command = self._capture_alarm_external_command(queue_id)\n"
+            "        self.mass.streams.audio.briefings.cancel_queue(queue_id)\n"
+            "        # cancel any pending play_index calls for this queue to prevent conflicts",
+        ),
+        (
+            "        await self.mass.players._handle_cmd_pause(queue_id)\n",
+            "        alarm_command_succeeded = False\n"
+            "        try:\n"
+            "            await self.mass.players._handle_cmd_pause(queue_id)\n"
+            "            alarm_command_succeeded = True\n"
+            "        finally:\n"
+            "            self._confirm_alarm_external_command(alarm_command, alarm_command_succeeded)\n",
+        ),
+    )
+    for old, new in replacements:
+        if updated.count(old) != 1:
+            raise RuntimeError("External alarm command hook changed; refusing stale patch")
+        updated = updated.replace(old, new, 1)
     tree = ast.parse(updated)
     compile(tree, "queue_controller.py", "exec")
     if "async def recover_alexa_flow(" not in updated:

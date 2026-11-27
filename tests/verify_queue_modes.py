@@ -2,6 +2,7 @@
 import ast
 import inspect
 from pathlib import Path
+import runpy
 
 from music_assistant.controllers.player_queues.controller import PlayerQueuesController
 import music_assistant.controllers.streams.audio as audio
@@ -21,6 +22,11 @@ expected = methods("class Host:\n" + (root / "test_commands.py.txt").read_text()
 installed = methods(inspect.getsource(PlayerQueuesController))
 for name, body in expected.items():
     assert installed.get(name) == body, f"Installed method differs: {name}"
+builder = runpy.run_path(str(root / "build_patch.py"))
+fixture = Path("/workspace/alarm-project/tests/fixtures/pinned_queue_controls.py.txt").read_text()
+controls = methods("class Host:\n" + builder["external_command_hooks"](fixture))
+for name, body in controls.items():
+    assert installed.get(name) == body, f"Installed queue control differs: {name}"
 assert callable(PlayerQueuesController.recover_alexa_flow)
 assert "remember_flow(" in inspect.getsource(audio)
 manifest = Path("/workspace/music_assistant_alarm_clock/config.yaml").read_text()

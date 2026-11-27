@@ -1,5 +1,5 @@
 name: "Music Assistant"
-version: "2.10.12-alarmclock.8"
+version: "2.10.12-alarmclock.9"
 slug: music_assistant_alarm_clock
 boot: manual
 description: Music Assistant 2.10.12 with the tested HA Alarm Clock companion and Plex Connect backport.

@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: DaFern/HA-Alarm-Clock
-          ref: 821c78151d2d9a5250c992b57b5fb684af8ac84b
+          ref: 3c983f0b103045af9b6105da42c4ca7b95ae993d
           path: alarm-project
           persist-credentials: false
       - name: Build hash-guarded recovery app
